@@ -51,8 +51,10 @@ static void SafeCopy(char* dest, size_t destSize, const char* src)
 
 RootHeraldResult RootHeraldEnroll(
     const char* server_url,
+    int force_reenroll,
     RootHeraldEnrollmentInfo* out_info)
 {
+    (void)force_reenroll;  /* macOS Secure Enclave does not yet honor re-enroll */
     if (!server_url || !out_info)
         return RH_PROTO_ERR_INVALID_PARAM;
 

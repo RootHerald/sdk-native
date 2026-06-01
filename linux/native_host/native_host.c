@@ -248,7 +248,7 @@ static void handle_enroll(const char* request_id, const char* server_url)
 
     RootHeraldEnrollmentInfo info;
     memset(&info, 0, sizeof(info));
-    RootHeraldResult result = RootHeraldEnroll(server_url, &info);
+    RootHeraldResult result = RootHeraldEnroll(server_url, /*force_reenroll=*/0, &info);
 
     char data[256];
     size_t doff = 0;

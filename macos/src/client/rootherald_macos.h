@@ -14,6 +14,7 @@
 
 RootHeraldResult RootHeraldEnroll(
     const char* server_url,
+    int force_reenroll,
     RootHeraldEnrollmentInfo* out_info
 );
 

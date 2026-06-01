@@ -62,7 +62,7 @@ static RootHeraldStatus map_status(RootHeraldResult r)
     switch (r) {
     case ROOTHERALD_OK: return ROOTHERALD_OK;
     case RH_PROTO_ERR_NO_TPM: return ROOTHERALD_ERR_TPM_UNAVAILABLE;
-    case ROOTHERALD_ERR_NETWORK: return ROOTHERALD_ERR_NETWORK;
+    case RH_PROTO_ERR_NETWORK: return ROOTHERALD_ERR_NETWORK;
     case RH_PROTO_ERR_ATTESTATION_FAILED: return ROOTHERALD_ERR_SERVER;
     case RH_PROTO_ERR_ENROLLMENT_FAILED: return ROOTHERALD_ERR_SERVER;
     case RH_PROTO_ERR_NOT_ENROLLED: return ROOTHERALD_ERR_SERVER;
@@ -160,7 +160,7 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_Verify(
 
     RootHeraldEnrollmentInfo enroll;
     memset(&enroll, 0, sizeof(enroll));
-    RootHeraldResult er = RootHeraldEnroll(client->endpoint, &enroll);
+    RootHeraldResult er = RootHeraldEnroll(client->endpoint, /*force_reenroll=*/0, &enroll);
     if (er != ROOTHERALD_OK && er != RH_PROTO_ERR_ALREADY_ENROLLED) {
         out_result->verdict = ROOTHERALD_VERDICT_DENY;
         copy_string(out_result->reason, sizeof(out_result->reason), "enrollment failed");

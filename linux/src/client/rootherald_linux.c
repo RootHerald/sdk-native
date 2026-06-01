@@ -271,8 +271,10 @@ static int der_to_pem(const uint8_t* der, size_t der_len, char* pem, size_t pem_
 
 RootHeraldResult RootHeraldEnroll(
     const char* server_url,
+    int force_reenroll,
     RootHeraldEnrollmentInfo* out_info)
 {
+    (void)force_reenroll;  /* TODO: honor by evicting persistent AK before enroll */
     if (!server_url || !out_info)
         return RH_PROTO_ERR_INVALID_PARAM;
 

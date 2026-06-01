@@ -97,7 +97,7 @@ static NSDictionary* HandleEnroll(NSString* requestId, NSString* serverUrl)
     }
 
     RootHeraldEnrollmentInfo info = {};
-    RootHeraldResult result = RootHeraldEnroll([serverUrl UTF8String], &info);
+    RootHeraldResult result = RootHeraldEnroll([serverUrl UTF8String], /*force_reenroll=*/0, &info);
 
     NSDictionary* data = @{
         @"deviceId": [NSString stringWithUTF8String:info.device_id]
