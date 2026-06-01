@@ -4,42 +4,30 @@ project(rootherald_macos VERSION 0.2.0 LANGUAGES C OBJC)
 set(CMAKE_C_STANDARD 11)
 
 # -----------------------------------------------------------------------------
-# Wave 6 — STATIC library on macOS.
+# librootherald.a — embeddable STATIC archive (macOS).
 #
-#   librootherald.a    — embeddable STATIC archive; carries the public C ABI
-#                        from <rootherald.h> and the legacy RootHerald*
-#                        symbols. Customer apps (and our own native_host
-#                        shell) static-link this archive directly.
-#   native_host        — browser-extension native-messaging shell. Static-
-#                        links librootherald.a + Foundation.framework. No
-#                        runtime dependency on a Root-Herald-signed dylib.
+# Customer apps link this directly into their .app; the resulting binary is
+# signed with the customer's Developer ID. No runtime dylib dependency on us.
 #
-# Design decision: previous waves shipped a Mach-O *framework* bundle so
-# that SwiftPM / Xcode consumers could drag-and-drop a `.framework` into
-# their project. With static linking, the framework wrapper would have to
-# be a *static framework* (an unusual Apple artefact that some tools handle
-# poorly) and the customer's own Developer ID covers the resulting binary
-# either way. We therefore ship the simpler `librootherald.a` + headers
-# pair; Xcode and SwiftPM both consume that directly via "Other Linker
-# Flags" / `linkerSettings`. A repackaging step into a static `.framework`
-# can be added back as a downstream packaging concern if a customer
-# requests it without affecting the ABI.
+# Layout (per the research reorg — see INTEGRATING.md):
+#   src/client/    — RootHeraldClient lifecycle + macOS driver
+#   src/tpm/       — Secure Enclave access
+#   src/transport/ — HTTPS via NSURLSession
+#   src/internal/  — Log shim (not exported)
 #
-# Stub mode (ROOTHERALD_STUB=ON): no Security/Foundation deps; canned data
-# for binding development. Same semantics as the Linux stub.
+# Stub mode (ROOTHERALD_STUB=ON) reuses the Linux stub implementation —
+# canned data for CI / binding development. Never ship a stub build.
 #
-# System frameworks customers must add to their own link line (transparent
-# when consuming this CMakeLists via target_link_libraries):
-#   Security.framework, Foundation.framework
+# System frameworks (propagated PUBLICly so consumers don't enumerate):
+#   Security.framework + Foundation.framework
 # -----------------------------------------------------------------------------
 
-option(ROOTHERALD_STUB "Build a stub librootherald.a (CI / binding tests only)" OFF)
+option(ROOTHERALD_STUB "Stub build (CI / binding tests only)" OFF)
 
 if(ROOTHERALD_STUB)
-    message(STATUS "Building librootherald.a as a STUB (no Secure Enclave). Do not ship.")
-    add_library(rootherald STATIC ../linux/rootherald_stub.c)
+    message(STATUS "Building librootherald.a as a STUB. Do not ship.")
+    add_library(rootherald STATIC ../linux/src/client/rootherald_stub.c)
     target_include_directories(rootherald PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/../common
     )
 else()
@@ -47,41 +35,33 @@ else()
     find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 
     add_library(rootherald STATIC
-        rootherald_client.m
-        rootherald_macos.m
-        secure_enclave.m
-        http_nsurlsession.m
+        src/client/rootherald_client.m
+        src/client/rootherald_macos.m
+        src/tpm/secure_enclave.m
+        src/transport/http_nsurlsession.m
+        src/internal/log.m
     )
 
-    target_include_directories(rootherald PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/../common
+    target_include_directories(rootherald
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/../common
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/client
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/tpm
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/transport
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/internal
     )
 
-    # PUBLIC: a static archive defers its system-framework resolution to
-    # the consuming executable's final link step. Propagating PUBLICly
-    # means customer integrations only need to link the `rootherald`
-    # target — the system frameworks come along automatically.
     target_link_libraries(rootherald PUBLIC
         ${SECURITY_FRAMEWORK}
         ${FOUNDATION_FRAMEWORK}
     )
 endif()
 
-add_library(rootherald ALIAS rootherald)
-
-# -----------------------------------------------------------------------------
-# native_host — thin browser-extension shell. Static-links librootherald.a.
-# -----------------------------------------------------------------------------
-add_executable(native_host
-    native_host/native_host.m
+install(TARGETS rootherald ARCHIVE DESTINATION lib)
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/rootherald.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/protocol.h
+    DESTINATION include
 )
-
-target_include_directories(native_host PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common
-)
-
-target_link_libraries(native_host PRIVATE rootherald)
-
-add_executable(rootherald-host ALIAS native_host)
