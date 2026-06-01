@@ -1,0 +1,9 @@
+{
+  "name": "com.rootherald.native",
+  "description": "RootHerald Device Attestation Native Host",
+  "path": "/usr/local/bin/rootherald-host",
+  "type": "stdio",
+  "allowed_extensions": [
+    "rootherald@rootherald.io"
+  ]
+}

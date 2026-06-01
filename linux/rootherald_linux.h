@@ -1,0 +1,29 @@
+/**
+ *  Root Herald Linux Client SDK
+ *
+ * Uses tpm2-tss ESAPI for TPM 2.0 access.
+ */
+
+#ifndef ROOTHERALD_LINUX_H
+#define ROOTHERALD_LINUX_H
+
+#include "protocol.h"
+
+RootHeraldResult RootHeraldEnroll(
+    const char* server_url,
+    RootHeraldEnrollmentInfo* out_info
+);
+
+RootHeraldResult RootHeraldAttest(
+    const char* server_url,
+    const char* session_id,
+    const char* nonce_b64,
+    size_t nonce_len,
+    RootHeraldAttestationInfo* out_info
+);
+
+RootHeraldResult RootHeraldGetStatus(
+    RootHeraldDeviceStatus* out_status
+);
+
+#endif /* ROOTHERALD_LINUX_H */
