@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cmake -B build/windows -S windows -G "Visual Studio 17 2022" -A x64
+          cmake --build build/windows --config Release
+        shell: pwsh
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libtss2-dev libcurl4-openssl-dev cmake
+      - run: |
+          cmake -B build/linux -S linux
+          cmake --build build/linux
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cmake -B build/macos -S macos
+          cmake --build build/macos

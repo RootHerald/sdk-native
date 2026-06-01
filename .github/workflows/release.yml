@@ -1,0 +1,64 @@
+name: Release
+
+# Builds platform-specific artifacts and attaches them to the GitHub Release.
+# Downstream repos (e.g. sdk-dotnet for RootHerald.Native runtime bundling,
+# windows-host for the installables) pull RootHerald.lib / librootherald.a /
+# the macOS framework from the release tag.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cmake -B build/windows -S windows -G "Visual Studio 17 2022" -A x64
+          cmake --build build/windows --config Release
+        shell: pwsh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: build/windows/Release/*.lib
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libtss2-dev libcurl4-openssl-dev cmake
+      - run: |
+          cmake -B build/linux -S linux
+          cmake --build build/linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: build/linux/*.a
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cmake -B build/macos -S macos
+          cmake --build build/macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: build/macos/*.a
+
+  release:
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true
