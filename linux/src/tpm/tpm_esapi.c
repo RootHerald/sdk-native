@@ -5,6 +5,7 @@
  */
 
 #include "tpm_esapi.h"
+#include "log.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -174,7 +175,7 @@ TpmContext* tpm_open(void)
     /* Auto-detect TCTI (tpm2-abrmd or /dev/tpmrm0) */
     TSS2_RC rc = Esys_Initialize(&ctx->esys_ctx, NULL, NULL);
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_open: Esys_Initialize failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_open: Esys_Initialize failed: 0x%x\n", (unsigned)rc);
         free(ctx);
         return NULL;
     }
@@ -237,7 +238,7 @@ int tpm_read_ek_cert(TpmContext* ctx, uint8_t* out_cert, size_t* out_cert_len)
                                ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
                                &nv_index_handle);
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_read_ek_cert: TR_FromTPMPublic failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_read_ek_cert: TR_FromTPMPublic failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 
@@ -246,7 +247,7 @@ int tpm_read_ek_cert(TpmContext* ctx, uint8_t* out_cert, size_t* out_cert_len)
                             ESYS_TR_NONE, ESYS_TR_NONE, ESYS_TR_NONE,
                             &nv_public, &nv_name);
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_read_ek_cert: NV_ReadPublic failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_read_ek_cert: NV_ReadPublic failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 
@@ -276,7 +277,7 @@ int tpm_read_ek_cert(TpmContext* ctx, uint8_t* out_cert, size_t* out_cert_len)
                           ESYS_TR_PASSWORD, ESYS_TR_NONE, ESYS_TR_NONE,
                           chunk, (uint16_t)offset, &nv_data);
         if (rc != TSS2_RC_SUCCESS) {
-            fprintf(stderr, "tpm_read_ek_cert: NV_Read failed at offset %zu: 0x%x\n",
+            RH_LOG_WARN("tpm_read_ek_cert: NV_Read failed at offset %zu: 0x%x\n",
                     offset, (unsigned)rc);
             return -1;
         }
@@ -334,7 +335,7 @@ int tpm_read_ek_pub(TpmContext* ctx, uint8_t* out_pub, size_t* out_pub_len)
     Esys_Free(creation_ticket);
 
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_read_ek_pub: CreatePrimary failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_read_ek_pub: CreatePrimary failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 
@@ -346,7 +347,7 @@ int tpm_read_ek_pub(TpmContext* ctx, uint8_t* out_pub, size_t* out_pub_len)
     Esys_Free(out_public);
 
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_read_ek_pub: Marshal failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_read_ek_pub: Marshal failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 
@@ -409,7 +410,7 @@ int tpm_create_ak(TpmContext* ctx)
     Esys_Free(creation_ticket);
 
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_create_ak: CreatePrimary(SRK) failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_create_ak: CreatePrimary(SRK) failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 
@@ -439,7 +440,7 @@ int tpm_create_ak(TpmContext* ctx)
     Esys_Free(creation_ticket);
 
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_create_ak: Create(AK) failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_create_ak: Create(AK) failed: 0x%x\n", (unsigned)rc);
         Esys_Free(ak_private);
         Esys_Free(ak_public);
         return -1;
@@ -466,7 +467,7 @@ int tpm_create_ak(TpmContext* ctx)
     Esys_Free(ak_public);
 
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_create_ak: Load(AK) failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_create_ak: Load(AK) failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 
@@ -505,7 +506,7 @@ int tpm_get_ak_pub(TpmContext* ctx, uint8_t* out_pub, size_t* out_pub_len)
     Esys_Free(qualified_name);
 
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_get_ak_pub: ReadPublic failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_get_ak_pub: ReadPublic failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 
@@ -566,7 +567,7 @@ int tpm_get_ak_name(TpmContext* ctx, uint8_t* out_name, size_t* out_name_len)
     Esys_Free(qualified_name);
 
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_get_ak_name: ReadPublic failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_get_ak_name: ReadPublic failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 
@@ -649,7 +650,7 @@ int tpm_quote(TpmContext* ctx,
     );
 
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_quote: Esys_Quote failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_quote: Esys_Quote failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 
@@ -734,7 +735,7 @@ int tpm_pcr_read(TpmContext* ctx,
     Esys_Free(pcr_selection_out);
 
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_pcr_read: PCR_Read failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_pcr_read: PCR_Read failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 
@@ -825,7 +826,7 @@ int tpm_activate_credential(TpmContext* ctx,
         &policy_session
     );
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_activate_credential: StartAuthSession failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_activate_credential: StartAuthSession failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 
@@ -857,7 +858,7 @@ int tpm_activate_credential(TpmContext* ctx,
     Esys_Free(policy_ticket);
 
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_activate_credential: PolicySecret failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_activate_credential: PolicySecret failed: 0x%x\n", (unsigned)rc);
         Esys_FlushContext(ctx->esys_ctx, policy_session);
         return -1;
     }
@@ -883,7 +884,7 @@ int tpm_activate_credential(TpmContext* ctx,
     /* Policy session is consumed by ActivateCredential */
 
     if (rc != TSS2_RC_SUCCESS) {
-        fprintf(stderr, "tpm_activate_credential: ActivateCredential failed: 0x%x\n", (unsigned)rc);
+        RH_LOG_WARN("tpm_activate_credential: ActivateCredential failed: 0x%x\n", (unsigned)rc);
         return -1;
     }
 

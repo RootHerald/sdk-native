@@ -166,8 +166,72 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_Verify(
     RootHeraldVerifyResult* out_result);
 
 /* ------------------------------------------------------------------ */
+/* Logging                                                            */
+/* ------------------------------------------------------------------ */
+/*
+ * The library is silent by default — no writes to stdout/stderr unless the
+ * customer explicitly registers a callback. This matches the precedent set
+ * by libfido2, libsodium, libcurl, and mbedTLS: a library embedded in a
+ * customer's binary should not impose log destinations on its host.
+ *
+ * Customers wire their preferred logger (spdlog, log4cpp, Sentry SDK, etc.)
+ * by registering a callback. Filtering happens internally: messages above
+ * the configured max level are dropped before any formatting work, so
+ * production builds can leave callbacks installed at ERROR without paying
+ * for TRACE-level message construction.
+ */
+
+typedef enum {
+    ROOTHERALD_LOG_ERROR = 0,
+    ROOTHERALD_LOG_WARN  = 1,
+    ROOTHERALD_LOG_INFO  = 2,
+    ROOTHERALD_LOG_DEBUG = 3,
+    ROOTHERALD_LOG_TRACE = 4
+} RootHeraldLogLevel;
+
+/**
+ * Receives a single formatted log message from the library. The `message`
+ * pointer is null-terminated and owned by the library; copy if you need to
+ * retain it past the call. `user_data` is whatever was passed to
+ * RootHerald_SetLogCallback. The callback may be invoked from any thread
+ * the library does work on; implementations should be thread-safe.
+ */
+typedef void (*RootHeraldLogCallback)(
+    RootHeraldLogLevel level,
+    const char* message,
+    void* user_data);
+
+/**
+ * Register a log callback. Pass NULL to disable logging entirely (default).
+ * Replaces any prior registration. Pass `user_data` to receive an arbitrary
+ * context pointer on every invocation; the library does not interpret it.
+ *
+ * Process-wide; not per-handle. Safe to call before any RootHeraldClient
+ * exists.
+ */
+ROOTHERALD_API void RootHerald_SetLogCallback(
+    RootHeraldLogCallback callback,
+    void* user_data);
+
+/**
+ * Set the maximum log level the library will emit. Defaults to
+ * ROOTHERALD_LOG_WARN. Messages with level > max_level are dropped before
+ * formatting, so this is the cheap way to gate verbose logging in
+ * production while keeping the callback registered.
+ */
+ROOTHERALD_API void RootHerald_SetLogLevel(RootHeraldLogLevel max_level);
+
+/* ------------------------------------------------------------------ */
 /* Utility                                                            */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Returns a human-readable, English string describing a status code.
+ * The pointer is owned by the library and remains valid for the process
+ * lifetime. Useful for surfacing failures to logs without a switch
+ * statement on every call site.
+ */
+ROOTHERALD_API const char* RootHerald_ErrorString(RootHeraldStatus status);
 
 /**
  * Returns the ABI version as a static "MAJOR.MINOR" string. The pointer

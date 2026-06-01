@@ -68,7 +68,8 @@ RootHeraldResult RootHeraldEnroll(
 
         SecKeyRef privateKey = [se getOrCreateDeviceKey:&error];
         if (!privateKey) {
-            NSLog(@"[RootHerald] Failed to get/create SE key: %@", error);
+            RH_LOG_WARN("Failed to get/create SE key: %s",
+                error.localizedDescription.UTF8String ?: "(no detail)");
             return RH_PROTO_ERR_INTERNAL;
         }
 
@@ -76,7 +77,8 @@ RootHeraldResult RootHeraldEnroll(
         NSData* pubKeyData = [se exportPublicKey:privateKey error:&error];
         if (!pubKeyData) {
             CFRelease(privateKey);
-            NSLog(@"[RootHerald] Failed to export public key: %@", error);
+            RH_LOG_WARN("Failed to export public key: %s",
+                error.localizedDescription.UTF8String ?: "(no detail)");
             return RH_PROTO_ERR_INTERNAL;
         }
 
@@ -100,8 +102,10 @@ RootHeraldResult RootHeraldEnroll(
 
         if (!enrollResp || statusCode != 201) {
             CFRelease(privateKey);
-            NSLog(@"[RootHerald] Enrollment POST failed (status %ld): %@",
-                  (long)statusCode, error ?: enrollResp);
+            RH_LOG_WARN("Enrollment POST failed (status %ld): %s",
+                (long)statusCode,
+                error ? error.localizedDescription.UTF8String
+                      : [[enrollResp description] UTF8String]);
             return RH_PROTO_ERR_ENROLLMENT_FAILED;
         }
 
@@ -112,7 +116,7 @@ RootHeraldResult RootHeraldEnroll(
 
         if (!deviceId || !credBlob || !encSecret) {
             CFRelease(privateKey);
-            NSLog(@"[RootHerald] Enrollment response missing required fields");
+            RH_LOG_WARN("Enrollment response missing required fields");
             return RH_PROTO_ERR_ENROLLMENT_FAILED;
         }
 
@@ -128,7 +132,8 @@ RootHeraldResult RootHeraldEnroll(
         NSData* signature = [se sign:encSecretData withPrivateKey:privateKey error:&error];
         if (!signature) {
             CFRelease(privateKey);
-            NSLog(@"[RootHerald] Failed to sign encrypted secret: %@", error);
+            RH_LOG_WARN("Failed to sign encrypted secret: %s",
+                error.localizedDescription.UTF8String ?: "(no detail)");
             return RH_PROTO_ERR_ENROLLMENT_FAILED;
         }
 
@@ -199,7 +204,8 @@ RootHeraldResult RootHeraldAttest(
         RootHeraldSecureEnclave* se = [[RootHeraldSecureEnclave alloc] init];
         SecKeyRef privateKey = [se getOrCreateDeviceKey:&error];
         if (!privateKey) {
-            NSLog(@"[RootHerald] Failed to get SE key for attestation: %@", error);
+            RH_LOG_WARN("Failed to get SE key for attestation: %s",
+                error.localizedDescription.UTF8String ?: "(no detail)");
             return RH_PROTO_ERR_INTERNAL;
         }
 
@@ -207,7 +213,8 @@ RootHeraldResult RootHeraldAttest(
         NSData* signature = [se sign:nonceData withPrivateKey:privateKey error:&error];
         if (!signature) {
             CFRelease(privateKey);
-            NSLog(@"[RootHerald] Failed to sign nonce: %@", error);
+            RH_LOG_WARN("Failed to sign nonce: %s",
+                error.localizedDescription.UTF8String ?: "(no detail)");
             return RH_PROTO_ERR_INTERNAL;
         }
 
@@ -218,7 +225,8 @@ RootHeraldResult RootHeraldAttest(
         CFRelease(privateKey);
 
         if (!pubKeyData) {
-            NSLog(@"[RootHerald] Failed to export public key: %@", error);
+            RH_LOG_WARN("Failed to export public key: %s",
+                error.localizedDescription.UTF8String ?: "(no detail)");
             return RH_PROTO_ERR_INTERNAL;
         }
 
@@ -246,8 +254,10 @@ RootHeraldResult RootHeraldAttest(
         NSDictionary* attestResp = HttpPostJson(attestUrl, attestBody, &statusCode, &error);
 
         if (!attestResp || statusCode != 200) {
-            NSLog(@"[RootHerald] Attestation POST failed (status %ld): %@",
-                  (long)statusCode, error ?: attestResp);
+            RH_LOG_WARN("Attestation POST failed (status %ld): %s",
+                (long)statusCode,
+                error ? error.localizedDescription.UTF8String
+                      : [[attestResp description] UTF8String]);
             return RH_PROTO_ERR_ATTESTATION_FAILED;
         }
 

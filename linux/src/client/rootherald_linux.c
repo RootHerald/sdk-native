@@ -8,6 +8,7 @@
 #include "rootherald_linux.h"
 #include "tpm_esapi.h"
 #include "event_log.h"
+#include "log.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -351,7 +352,7 @@ RootHeraldResult RootHeraldEnroll(
     char response[8192];
     int http_code = http_post_json(url, body, response, sizeof(response));
     if (http_code != 201 && http_code != 200) {
-        fprintf(stderr, "RootHeraldEnroll: enrollment POST returned %d\n", http_code);
+        RH_LOG_WARN("RootHeraldEnroll: enrollment POST returned %d\n", http_code);
         tpm_close(tpm);
         return RH_PROTO_ERR_ENROLLMENT_FAILED;
     }
@@ -397,7 +398,7 @@ RootHeraldResult RootHeraldEnroll(
 
     if (act_rc != 0) {
         /* Activation failed — return partial info so caller can retry */
-        fprintf(stderr, "RootHeraldEnroll: ActivateCredential failed\n");
+        RH_LOG_WARN("RootHeraldEnroll: ActivateCredential failed\n");
         strncpy(out_info->device_id, device_id, sizeof(out_info->device_id) - 1);
         strncpy(out_info->credential_blob, cred_blob_b64, sizeof(out_info->credential_blob) - 1);
         strncpy(out_info->encrypted_secret, enc_secret_b64, sizeof(out_info->encrypted_secret) - 1);
@@ -425,7 +426,7 @@ RootHeraldResult RootHeraldEnroll(
     char activate_response[4096];
     http_code = http_post_json(url, activate_body, activate_response, sizeof(activate_response));
     if (http_code != 200) {
-        fprintf(stderr, "RootHeraldEnroll: activation POST returned %d\n", http_code);
+        RH_LOG_WARN("RootHeraldEnroll: activation POST returned %d\n", http_code);
         tpm_close(tpm);
         return RH_PROTO_ERR_ENROLLMENT_FAILED;
     }
@@ -482,7 +483,7 @@ RootHeraldResult RootHeraldAttest(
     if (tpm_quote(tpm, nonce, nonce_decoded_len,
                   pcr_indices, pcr_count,
                   quoted, &quoted_len, sig, &sig_len) != 0) {
-        fprintf(stderr, "RootHeraldAttest: tpm_quote failed\n");
+        RH_LOG_WARN("RootHeraldAttest: tpm_quote failed\n");
         tpm_close(tpm);
         return RH_PROTO_ERR_ATTESTATION_FAILED;
     }
@@ -568,7 +569,7 @@ RootHeraldResult RootHeraldAttest(
     char response[8192];
     int http_code = http_post_json(url, body, response, sizeof(response));
     if (http_code != 200) {
-        fprintf(stderr, "RootHeraldAttest: attest POST returned %d\n", http_code);
+        RH_LOG_WARN("RootHeraldAttest: attest POST returned %d\n", http_code);
         tpm_close(tpm);
         return RH_PROTO_ERR_ATTESTATION_FAILED;
     }

@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "log.h"
 
 #include <curl/curl.h>
 
@@ -58,7 +59,7 @@ int http_post_json(const char* url, const char* json_body,
 
     CURL *curl = curl_easy_init();
     if (!curl) {
-        fprintf(stderr, "http_post_json: curl_easy_init failed\n");
+        RH_LOG_WARN("http_post_json: curl_easy_init failed\n");
         return -1;
     }
 
@@ -98,7 +99,7 @@ int http_post_json(const char* url, const char* json_body,
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
-        fprintf(stderr, "http_post_json: curl_easy_perform failed: %s\n",
+        RH_LOG_WARN("http_post_json: curl_easy_perform failed: %s\n",
                 curl_easy_strerror(res));
         return -1;
     }
@@ -119,7 +120,7 @@ int http_get(const char* url, char* response_buf, size_t response_buf_len)
 
     CURL *curl = curl_easy_init();
     if (!curl) {
-        fprintf(stderr, "http_get: curl_easy_init failed\n");
+        RH_LOG_WARN("http_get: curl_easy_init failed\n");
         return -1;
     }
 
@@ -154,7 +155,7 @@ int http_get(const char* url, char* response_buf, size_t response_buf_len)
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
-        fprintf(stderr, "http_get: curl_easy_perform failed: %s\n",
+        RH_LOG_WARN("http_get: curl_easy_perform failed: %s\n",
                 curl_easy_strerror(res));
         return -1;
     }
