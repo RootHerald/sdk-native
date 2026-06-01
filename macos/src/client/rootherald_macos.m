@@ -10,6 +10,7 @@
 #import "rootherald_macos.h"
 #import "secure_enclave.h"
 #import "http_nsurlsession.h"
+#import "../internal/log.h"
 #import <Foundation/Foundation.h>
 #import <string.h>
 
