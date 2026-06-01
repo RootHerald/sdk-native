@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "com.unity.ugui": "1.0.0",
+    "com.unity.modules.unityui": "1.0.0",
+    "com.unity.modules.unitywebrequest": "1.0.0"
+  }
+}

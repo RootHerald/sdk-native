@@ -1,0 +1,188 @@
+/**
+ * Root Herald — public C ABI for embeddable native SDK.
+ *
+ * This header is the stable, language-agnostic surface for the Root Herald
+ * native SDK. It is C99-compatible (no C++ features) so it can be consumed
+ * from C, C++, Rust, Go, Zig, Swift (via clang module), and P/Invoke
+ * (.NET) without an intermediate shim layer.
+ *
+ * Transport modes (N4)
+ * --------------------
+ * The client distinguishes the three deployment modes purely by the URL
+ * passed to RootHeraldClient_Create / RootHeraldClient_SetEndpoint:
+ *   - "https://rootherald.io"            → direct
+ *   - "https://attest.customer.com"      → custom domain (transparent)
+ *   - "https://api.customer.com/rh-proxy" → reverse-proxy (transparent;
+ *                                            the proxy forwards to us)
+ *
+ * The library issues identical wire traffic in all three cases. Routing
+ * concerns live entirely at the endpoint operator.
+ *
+ * Memory ownership
+ * ----------------
+ * All RootHeraldClient* handles must be paired with RootHeraldClient_Destroy.
+ * RootHeraldVerifyResult is a caller-allocated struct; the library only
+ * writes into it. There are no heap allocations transferred across the ABI.
+ *
+ * Thread-safety
+ * -------------
+ * A RootHeraldClient* may be used from any thread, but is not safe for
+ * concurrent calls from multiple threads. Serialize calls behind a mutex
+ * if you need shared use.
+ */
+
+#ifndef ROOTHERALD_H
+#define ROOTHERALD_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+#define ROOTHERALD_ABI_VERSION_MAJOR 1
+#define ROOTHERALD_ABI_VERSION_MINOR 0
+
+/*
+ * Linkage model (Wave 6 — static library)
+ * ---------------------------------------
+ * The Root Herald native library ships as a *static* archive
+ * (`RootHerald.lib` on Windows, `librootherald.a` on Linux, `librootherald.a`
+ * inside a static framework on macOS). Customers link it into their own
+ * binary at compile time, which is then signed by their own EV / Developer ID
+ * certificate. There is no runtime .dll / .so / .dylib dependency on us.
+ *
+ * As a result there is no `__declspec(dllexport/dllimport)` decoration on
+ * the public ABI: every public symbol is a plain `extern "C"` function with
+ * default visibility. `ROOTHERALD_API` is retained as a backwards-compatible
+ * no-op so older translation units that reference it still compile.
+ *
+ * The handful of cases that *do* still ship a dynamic library — the .NET
+ * NuGet's `RootHerald.Native.dll`, the Node N-API `.node` addon, and the
+ * Python wheel-internal shared lib — wrap this same static library themselves
+ * and re-export via their host runtime's normal mechanism (P/Invoke, N-API,
+ * ctypes). They do not need the public ABI to carry Windows DLL decorations.
+ */
+#define ROOTHERALD_API /* static linkage — no decoration */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Opaque client handle. */
+typedef struct RootHeraldClient RootHeraldClient;
+
+/* Result codes returned by client entry points. */
+typedef enum {
+    ROOTHERALD_OK = 0,
+    ROOTHERALD_ERR_INVALID_ARG = 1,
+    ROOTHERALD_ERR_TPM_UNAVAILABLE = 2,
+    ROOTHERALD_ERR_NETWORK = 3,
+    ROOTHERALD_ERR_SERVER = 4,
+    ROOTHERALD_ERR_QUOTA_EXCEEDED = 5,
+    ROOTHERALD_ERR_INTERNAL = 99
+} RootHeraldStatus;
+
+/* High-level verdict returned by Verify(). */
+typedef enum {
+    ROOTHERALD_VERDICT_ALLOW = 0,
+    ROOTHERALD_VERDICT_WARN = 1,
+    ROOTHERALD_VERDICT_DENY = 2
+} RootHeraldVerdict;
+
+/* Result of RootHeraldClient_Verify. Caller-allocated; fields are
+ * fixed-length null-terminated strings to avoid cross-ABI allocation. */
+typedef struct {
+    RootHeraldVerdict verdict;
+    char device_id[129];        /* UUID or opaque, null-terminated */
+    char tpm_class[64];         /* enum stringified, null-terminated */
+    char posture_json[1024];    /* opaque posture blob, null-terminated */
+    char reason[256];           /* human-readable reason on deny/warn */
+} RootHeraldVerifyResult;
+
+/* ------------------------------------------------------------------ */
+/* Lifecycle                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Create a new client.
+ *   api_key  : your tenant's publishable key (rh_pk_live_...). Required.
+ *   endpoint : base URL. NULL means "default rootherald.io".
+ * Returns NULL on out-of-memory or invalid argument.
+ */
+ROOTHERALD_API RootHeraldClient* RootHeraldClient_Create(
+    const char* api_key,
+    const char* endpoint);
+
+/**
+ * Destroy a client. Safe to call with NULL.
+ */
+ROOTHERALD_API void RootHeraldClient_Destroy(RootHeraldClient* client);
+
+/* ------------------------------------------------------------------ */
+/* Endpoint and config                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Replace the endpoint URL after construction. The library treats every
+ * endpoint identically — the URL distinguishes direct / custom-domain /
+ * proxy mode but the wire format is the same in all three cases.
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetEndpoint(
+    RootHeraldClient* client,
+    const char* endpoint);
+
+/**
+ * Associate this client with a logical application id (e.g. "launcher",
+ * "matchmaker"). Surfaced in audit logs and per-application policy.
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetApplicationId(
+    RootHeraldClient* client,
+    const char* app_id);
+
+/**
+ * Enable mock-TPM mode. When true, the client emits canned attestation
+ * evidence and never touches real TPM / Secure-Enclave hardware. Intended
+ * for headless build agents and CI; never enable in production.
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetMockTpm(
+    RootHeraldClient* client,
+    int mock_enabled);
+
+/* ------------------------------------------------------------------ */
+/* Verify operation                                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Collect fresh attestation evidence and POST it to {endpoint}/api/v1/attestations/verify.
+ *   action       : the relying-party-defined action being authorized
+ *                  (e.g. "game-launch", "transfer-funds"). NULL → "default".
+ *   out_result   : caller-allocated; fields are populated on ROOTHERALD_OK.
+ *
+ * Returns ROOTHERALD_OK iff the server returned an authoritative verdict.
+ * Network and server errors return distinct codes so the caller can
+ * fail-open or fail-closed per policy.
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_Verify(
+    RootHeraldClient* client,
+    const char* action,
+    RootHeraldVerifyResult* out_result);
+
+/* ------------------------------------------------------------------ */
+/* Utility                                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Returns the ABI version as a static "MAJOR.MINOR" string. The pointer
+ * is owned by the library and remains valid for the process lifetime.
+ */
+ROOTHERALD_API const char* RootHerald_AbiVersionString(void);
+
+/**
+ * Returns the library build version (semver) as a static null-terminated
+ * string. Same ownership rules as RootHerald_AbiVersionString().
+ */
+ROOTHERALD_API const char* RootHerald_LibraryVersionString(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* ROOTHERALD_H */

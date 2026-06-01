@@ -1,0 +1,25 @@
+{
+    "FileVersion": 3,
+    "Version": 1,
+    "VersionName": "0.2.0",
+    "FriendlyName": "Root Herald",
+    "Description": "Hardware-rooted device attestation for Unreal Engine. Wraps the Root Herald native SDK with Blueprint-callable nodes.",
+    "Category": "Online Platform",
+    "CreatedBy": "Root Herald",
+    "CreatedByURL": "https://rootherald.io",
+    "DocsURL": "https://rootherald.io/developers/sdks/unreal",
+    "MarketplaceURL": "",
+    "SupportURL": "https://rootherald.io/contact",
+    "EnabledByDefault": true,
+    "CanContainContent": true,
+    "IsBetaVersion": false,
+    "Installed": false,
+    "Modules": [
+        {
+            "Name": "RootHeraldUE",
+            "Type": "Runtime",
+            "LoadingPhase": "Default",
+            "WhitelistPlatforms": [ "Win64", "Mac", "Linux", "IOS", "Android" ]
+        }
+    ]
+}
