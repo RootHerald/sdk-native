@@ -73,3 +73,6 @@ logs/
 *.local.json
 docker-compose.override.yml
 docker-compose.local.yml
+
+# Local smoke-build directory (not for commit)
+windows/build-verify/
