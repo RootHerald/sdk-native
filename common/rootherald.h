@@ -38,7 +38,7 @@
 #include <stddef.h>
 
 #define ROOTHERALD_ABI_VERSION_MAJOR 1
-#define ROOTHERALD_ABI_VERSION_MINOR 0
+#define ROOTHERALD_ABI_VERSION_MINOR 1
 
 /*
  * Linkage model (Wave 6 — static library)
@@ -77,6 +77,7 @@ typedef enum {
     ROOTHERALD_ERR_NETWORK = 3,
     ROOTHERALD_ERR_SERVER = 4,
     ROOTHERALD_ERR_QUOTA_EXCEEDED = 5,
+    ROOTHERALD_ERR_NOT_ENROLLED = 6,
     ROOTHERALD_ERR_INTERNAL = 99
 } RootHeraldStatus;
 
@@ -96,6 +97,28 @@ typedef struct {
     char posture_json[1024];    /* opaque posture blob, null-terminated */
     char reason[256];           /* human-readable reason on deny/warn */
 } RootHeraldVerifyResult;
+
+/* Result of RootHeraldClient_Enroll. Caller-allocated. */
+typedef struct {
+    char device_id[129];
+} RootHeraldEnrollResult;
+
+/* Result of RootHeraldClient_AttestSession. Caller-allocated. */
+typedef struct {
+    char session_id[64];
+    char status[32];            /* "verified" | "failed" | "expired" */
+    char authorization_code[128];
+    char redirect_uri[2048];
+    char reason[512];           /* human-readable failure reason */
+} RootHeraldAttestResult;
+
+/* Result of RootHeraldClient_GetDeviceInfo. Caller-allocated. */
+typedef struct {
+    int is_enrolled;
+    int has_tpm;
+    char device_id[129];
+    char platform_name[16];     /* "windows" | "linux" | "macos" */
+} RootHeraldDeviceInfo;
 
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                          */
@@ -164,6 +187,72 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_Verify(
     RootHeraldClient* client,
     const char* action,
     RootHeraldVerifyResult* out_result);
+
+/* ------------------------------------------------------------------ */
+/* Session-based attestation (server-challenge flow)                  */
+/* ------------------------------------------------------------------ */
+/*
+ * The session flow is the server-driven counterpart to Verify(): your
+ * backend creates an attestation session (and challenge nonce) with the
+ * Root Herald API, hands the session id + nonce to the device, and the
+ * device answers the challenge with a fresh hardware quote. On success
+ * the result carries an authorization code your backend redeems.
+ *
+ * Every enroll/activate/attest request issued by these entry points
+ * carries the handle's publishable key as the `X-RootHerald-Site-Key`
+ * header so the attestation is attributed to your tenant.
+ *
+ * Currently fully implemented on Windows. On Linux and macOS these
+ * entry points compile and link but return ROOTHERALD_ERR_INTERNAL
+ * until the per-platform implementations land.
+ */
+
+/**
+ * Ensure this device is enrolled with the endpoint configured on the client.
+ * ALREADY_ENROLLED is mapped to ROOTHERALD_OK (out->device_id still filled).
+ *   force_reenroll : 0 keeps an existing enrollment; non-zero rotates the
+ *                    attestation key and re-enrolls.
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_Enroll(
+    RootHeraldClient* client,
+    int force_reenroll,
+    RootHeraldEnrollResult* out_result);
+
+/**
+ * Server-challenge attestation: TPM quote over nonce for an existing session.
+ * nonce_b64 is a null-terminated base64 string (no separate length param).
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_AttestSession(
+    RootHeraldClient* client,
+    const char* session_id,
+    const char* nonce_b64,
+    RootHeraldAttestResult* out_result);
+
+/**
+ * One-shot link token consumed by the next AttestSession on this handle.
+ * Binds that attestation to a user account. Pass NULL to clear a pending
+ * token.
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetLinkToken(
+    RootHeraldClient* client,
+    const char* link_token);
+
+/**
+ * Local device/TPM status; never touches the network.
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_GetDeviceInfo(
+    RootHeraldClient* client,
+    RootHeraldDeviceInfo* out_result);
+
+/**
+ * Elevated-child entry for the Windows TBS activation fallback (public
+ * re-export of the legacy RootHeraldRunElevatedEstablishKey). Hosts MUST
+ * route `--establish-key <url> <path>` argv here before normal startup;
+ * documented in INTEGRATING.md. Returns 0 on success.
+ */
+ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(
+    const char* server_url,
+    const char* result_path);
 
 /* ------------------------------------------------------------------ */
 /* Logging                                                            */

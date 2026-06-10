@@ -87,5 +87,61 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_Verify(
     return ROOTHERALD_OK;
 }
 
-ROOTHERALD_API const char* RootHerald_AbiVersionString(void)  { return "1.0"; }
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_Enroll(
+    RootHeraldClient* client, int force_reenroll, RootHeraldEnrollResult* out_result)
+{
+    (void)force_reenroll;
+    if (!client || !out_result) return ROOTHERALD_ERR_INVALID_ARG;
+    memset(out_result, 0, sizeof(*out_result));
+    copy_string(out_result->device_id, sizeof(out_result->device_id),
+                "00000000-0000-4000-8000-000000000stub");
+    return ROOTHERALD_OK;
+}
+
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_AttestSession(
+    RootHeraldClient* client, const char* session_id, const char* nonce_b64,
+    RootHeraldAttestResult* out_result)
+{
+    if (!client || !out_result || !session_id || !session_id[0] ||
+        !nonce_b64 || !nonce_b64[0])
+        return ROOTHERALD_ERR_INVALID_ARG;
+    memset(out_result, 0, sizeof(*out_result));
+    copy_string(out_result->session_id, sizeof(out_result->session_id), session_id);
+    copy_string(out_result->status, sizeof(out_result->status), "verified");
+    copy_string(out_result->authorization_code, sizeof(out_result->authorization_code),
+                "stub-authorization-code");
+    copy_string(out_result->reason, sizeof(out_result->reason), "stub library");
+    return ROOTHERALD_OK;
+}
+
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetLinkToken(
+    RootHeraldClient* client, const char* link_token)
+{
+    (void)link_token;
+    if (!client) return ROOTHERALD_ERR_INVALID_ARG;
+    return ROOTHERALD_OK;
+}
+
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_GetDeviceInfo(
+    RootHeraldClient* client, RootHeraldDeviceInfo* out_result)
+{
+    if (!client || !out_result) return ROOTHERALD_ERR_INVALID_ARG;
+    memset(out_result, 0, sizeof(*out_result));
+    out_result->is_enrolled = 1;
+    out_result->has_tpm = 1;
+    copy_string(out_result->device_id, sizeof(out_result->device_id),
+                "00000000-0000-4000-8000-000000000stub");
+    copy_string(out_result->platform_name, sizeof(out_result->platform_name), "stub");
+    return ROOTHERALD_OK;
+}
+
+ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(
+    const char* server_url, const char* result_path)
+{
+    (void)server_url;
+    (void)result_path;
+    return 0;
+}
+
+ROOTHERALD_API const char* RootHerald_AbiVersionString(void)  { return "1.1"; }
 ROOTHERALD_API const char* RootHerald_LibraryVersionString(void) { return "stub-0.2.0"; }

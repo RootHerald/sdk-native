@@ -46,6 +46,83 @@ int main(void) {
 
 A runnable copy of the above lives under `samples/minimal/<platform>/`.
 
+## Session-based attestation (server-challenge flow)
+
+`RootHeraldClient_Verify` is the one-call, client-initiated path. For flows
+where **your backend** owns the challenge — login binding, step-up
+authorization, the hosted attestation UI — use the session surface instead:
+
+1. Your backend creates an attestation session with the Root Herald API and
+   receives a `session_id` plus a base64 challenge `nonce`.
+2. Your backend hands both to the device (your app, or the Root Herald
+   browser extension + native host).
+3. The device answers the challenge with a fresh hardware quote.
+4. On success the result carries an `authorization_code` your backend
+   redeems to obtain the attestation verdict/JWT.
+
+```c
+RootHeraldClient* c = RootHeraldClient_Create("rh_pk_live_...", NULL);
+
+/* One-time (idempotent) device enrollment. ALREADY_ENROLLED maps to OK. */
+RootHeraldEnrollResult e;
+if (RootHeraldClient_Enroll(c, /*force_reenroll=*/0, &e) != ROOTHERALD_OK) { /* ... */ }
+
+/* Optional: bind the next attestation to a user account. One-shot. */
+RootHeraldClient_SetLinkToken(c, link_token_from_your_backend);
+
+/* Answer the server's challenge. nonce_b64 is the null-terminated base64
+ * nonce exactly as your backend received it from the Root Herald API. */
+RootHeraldAttestResult a;
+RootHeraldStatus st = RootHeraldClient_AttestSession(c, session_id, nonce_b64, &a);
+if (st == ROOTHERALD_OK && strcmp(a.status, "verified") == 0) {
+    /* hand a.authorization_code back to your backend */
+}
+
+/* Local device/TPM status — never touches the network. */
+RootHeraldDeviceInfo info;
+RootHeraldClient_GetDeviceInfo(c, &info);
+```
+
+Every enroll/activate/attest request issued through a client handle carries
+the handle's publishable key as the `X-RootHerald-Site-Key` header, so the
+attestation is attributed (and billed) to your tenant.
+
+The session surface is fully implemented on **Windows** today. On Linux and
+macOS the entry points compile and link but return `ROOTHERALD_ERR_INTERNAL`
+("not implemented on this platform yet") until the per-platform
+implementations land. `RootHeraldClient_Verify` works on all three.
+
+## Hosting requirement: `--establish-key` (Windows)
+
+Windows TBS only permits raw TPM 2.0 credential activation
+(`TPM2_ActivateCredential`) for an **elevated** caller. When the
+unprivileged NCrypt/PCP path is rejected by the firmware, the SDK falls
+back to spawning *your executable* elevated (one UAC prompt) with:
+
+```
+your_app.exe --establish-key <server_url> <result_path>
+```
+
+Any process that calls `RootHeraldClient_Enroll`,
+`RootHeraldClient_AttestSession`, or `RootHeraldClient_Verify` MUST route
+that argv pair to the SDK **before any normal startup work**:
+
+```c
+int main(int argc, char** argv) {
+    if (argc >= 4 && strcmp(argv[1], "--establish-key") == 0) {
+        return RootHerald_RunElevatedEstablishKey(argv[2], argv[3]);
+    }
+    /* ... normal startup ... */
+}
+```
+
+The elevated child performs the raw-TBS enrollment, writes the resulting
+device id to `<result_path>`, and exits; the parent picks the result up and
+continues unprivileged. If the host does not route this argument the
+TBS fallback cannot complete and enrollment fails on firmware that rejects
+unprivileged PCP activation. `samples/minimal/windows/main.cpp` shows the
+exact pattern.
+
 ## Platform-specific notes
 
 ### Windows (`windows/`)
@@ -152,9 +229,11 @@ implementation must be thread-safe.
 
 ## Memory ownership
 
-No heap-allocated values cross the ABI. `RootHeraldVerifyResult` is
-caller-allocated; the library only writes into it. All handles are
-opaque and must be paired with `RootHeraldClient_Destroy`.
+No heap-allocated values cross the ABI. All result structs
+(`RootHeraldVerifyResult`, `RootHeraldEnrollResult`,
+`RootHeraldAttestResult`, `RootHeraldDeviceInfo`) are caller-allocated;
+the library only writes into them. All handles are opaque and must be
+paired with `RootHeraldClient_Destroy`.
 
 ## What this SDK does NOT do
 
