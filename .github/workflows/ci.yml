@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          cmake -B build/windows -S windows -G "Visual Studio 17 2022" -A x64
+          cmake -B build/windows -S windows -A x64
           cmake --build build/windows --config Release
         shell: pwsh
 
