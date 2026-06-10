@@ -33,7 +33,7 @@ struct RootHeraldClient {
     pthread_mutex_t lock;
 };
 
-static const char* const kAbiVersion = "1.0";
+static const char* const kAbiVersion = "1.1";
 static const char* const kLibraryVersion = "0.2.0";
 static const char* const kDefaultEndpoint = "https://rootherald.io";
 
@@ -65,7 +65,7 @@ static RootHeraldStatus map_status(RootHeraldResult r)
     case RH_PROTO_ERR_NETWORK: return ROOTHERALD_ERR_NETWORK;
     case RH_PROTO_ERR_ATTESTATION_FAILED: return ROOTHERALD_ERR_SERVER;
     case RH_PROTO_ERR_ENROLLMENT_FAILED: return ROOTHERALD_ERR_SERVER;
-    case RH_PROTO_ERR_NOT_ENROLLED: return ROOTHERALD_ERR_SERVER;
+    case RH_PROTO_ERR_NOT_ENROLLED: return ROOTHERALD_ERR_NOT_ENROLLED;
     case RH_PROTO_ERR_INVALID_PARAM: return ROOTHERALD_ERR_INVALID_ARG;
     case RH_PROTO_ERR_ALREADY_ENROLLED: return ROOTHERALD_OK;
     default: return ROOTHERALD_ERR_INTERNAL;

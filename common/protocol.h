@@ -145,6 +145,18 @@ typedef struct {
     int has_tpm;
 } RootHeraldDeviceStatus;
 
+/*
+ * DEPRECATED (2026-06): the global functions below are the legacy,
+ * pre-handle SDK surface. New integrations should use the handle-based
+ * RootHeraldClient_* API declared in <rootherald.h> instead
+ * (RootHeraldClient_Enroll / RootHeraldClient_AttestSession /
+ * RootHeraldClient_SetLinkToken / RootHeraldClient_GetDeviceInfo and
+ * RootHerald_RunElevatedEstablishKey). The handle API carries the
+ * tenant's publishable site key on every request and is the only
+ * surface that gains new capabilities. These globals keep shipping for
+ * existing consumers but will not be extended.
+ */
+
 /**
  * Enroll this device with the  Root Herald platform.
  * Initiates the EK validation and credential activation flow.

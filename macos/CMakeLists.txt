@@ -36,6 +36,7 @@ else()
 
     add_library(rootherald STATIC
         src/client/rootherald_client.m
+        src/client/rootherald_session.m
         src/client/rootherald_macos.m
         src/tpm/secure_enclave.m
         src/transport/http_nsurlsession.m

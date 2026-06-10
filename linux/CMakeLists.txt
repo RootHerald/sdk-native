@@ -37,6 +37,7 @@ else()
 
     add_library(rootherald STATIC
         src/client/rootherald_client.c
+        src/client/rootherald_session.c
         src/client/rootherald_linux.c
         src/tpm/tpm_esapi.c
         src/boot/event_log.c
