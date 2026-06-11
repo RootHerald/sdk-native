@@ -135,6 +135,26 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_GetDeviceInfo(
     return ROOTHERALD_OK;
 }
 
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
+    RootHeraldClient* client, RootHeraldPosture* out_result)
+{
+    if (!client || !out_result) return ROOTHERALD_ERR_INVALID_ARG;
+    memset(out_result, 0, sizeof(*out_result));
+    out_result->has_tpm = 1;
+    out_result->is_enrolled = 1;
+    out_result->ek_cert_present = 1;
+    out_result->secure_boot = 1;
+    out_result->oem_keyed = 1;
+    copy_string(out_result->oem_name, sizeof(out_result->oem_name), "StubOEM");
+    out_result->boot_log_measurements = 42;
+    out_result->boot_log_revoked = 0;
+    copy_string(out_result->device_id, sizeof(out_result->device_id),
+                "00000000-0000-4000-8000-000000000stub");
+    copy_string(out_result->detail_json, sizeof(out_result->detail_json),
+                "{\"stub\":true}");
+    return ROOTHERALD_OK;
+}
+
 ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(
     const char* server_url, const char* result_path)
 {
@@ -143,5 +163,5 @@ ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(
     return 0;
 }
 
-ROOTHERALD_API const char* RootHerald_AbiVersionString(void)  { return "1.1"; }
+ROOTHERALD_API const char* RootHerald_AbiVersionString(void)  { return "1.2"; }
 ROOTHERALD_API const char* RootHerald_LibraryVersionString(void) { return "stub-0.2.0"; }

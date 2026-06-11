@@ -3,11 +3,11 @@
  *
  * The session-based attestation surface (RootHeraldClient_Enroll /
  * RootHeraldClient_AttestSession / RootHeraldClient_SetLinkToken /
- * RootHeraldClient_GetDeviceInfo / RootHerald_RunElevatedEstablishKey)
- * is fully implemented on Windows only. These stubs keep librootherald.a
- * ABI-complete on macOS until the Secure-Enclave-backed implementation
- * lands: every entry point validates arguments, logs once, and returns
- * ROOTHERALD_ERR_INTERNAL.
+ * RootHeraldClient_GetDeviceInfo / RootHeraldClient_CollectPosture /
+ * RootHerald_RunElevatedEstablishKey) is fully implemented on Windows
+ * only. These stubs keep librootherald.a ABI-complete on macOS until the
+ * Secure-Enclave-backed implementation lands: every entry point validates
+ * arguments, logs once, and returns ROOTHERALD_ERR_INTERNAL.
  */
 
 #include "rootherald.h"
@@ -52,6 +52,15 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_GetDeviceInfo(
     if (!client || !out_result) return ROOTHERALD_ERR_INVALID_ARG;
     memset(out_result, 0, sizeof(*out_result));
     RH_LOG_WARN("RootHeraldClient_GetDeviceInfo: not implemented on this platform yet\n");
+    return ROOTHERALD_ERR_INTERNAL;
+}
+
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
+    RootHeraldClient* client, RootHeraldPosture* out_result)
+{
+    if (!client || !out_result) return ROOTHERALD_ERR_INVALID_ARG;
+    memset(out_result, 0, sizeof(*out_result));
+    RH_LOG_WARN("RootHeraldClient_CollectPosture: not implemented on this platform yet\n");
     return ROOTHERALD_ERR_INTERNAL;
 }
 
