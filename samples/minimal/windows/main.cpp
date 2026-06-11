@@ -83,6 +83,21 @@ int main(int argc, char** argv) {
                     info.platform_name, info.has_tpm, info.is_enrolled, info.device_id);
     }
 
+    // Local-only readiness posture — the free pre-flight check. Never touches
+    // the network, so it runs unconditionally. These are readiness SIGNALS,
+    // not a verdict; the verdict is always server-side (Verify/AttestSession).
+    RootHeraldPosture posture{};
+    if (RootHeraldClient_CollectPosture(client, &posture) == ROOTHERALD_OK) {
+        std::printf("posture: has_tpm=%d is_enrolled=%d ek_cert_present=%d "
+                    "secure_boot=%d oem_keyed=%d oem_name=%s "
+                    "boot_log_measurements=%d boot_log_revoked=%d device_id=%s\n",
+                    posture.has_tpm, posture.is_enrolled, posture.ek_cert_present,
+                    posture.secure_boot, posture.oem_keyed, posture.oem_name,
+                    posture.boot_log_measurements, posture.boot_log_revoked,
+                    posture.device_id);
+        std::printf("posture detail: %s\n", posture.detail_json);
+    }
+
     // Session flow only when explicitly requested — the session id and nonce
     // must come from a real backend challenge, so the default standalone run
     // sticks to Verify.

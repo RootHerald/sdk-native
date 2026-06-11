@@ -33,7 +33,7 @@ struct RootHeraldClient {
     pthread_mutex_t lock;
 };
 
-static const char* const kAbiVersion = "1.1";
+static const char* const kAbiVersion = "1.2";
 static const char* const kLibraryVersion = "0.2.0";
 static const char* const kDefaultEndpoint = "https://rootherald.io";
 

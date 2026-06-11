@@ -38,7 +38,7 @@
 #include <stddef.h>
 
 #define ROOTHERALD_ABI_VERSION_MAJOR 1
-#define ROOTHERALD_ABI_VERSION_MINOR 1
+#define ROOTHERALD_ABI_VERSION_MINOR 2
 
 /*
  * Linkage model (Wave 6 — static library)
@@ -119,6 +119,20 @@ typedef struct {
     char device_id[129];
     char platform_name[16];     /* "windows" | "linux" | "macos" */
 } RootHeraldDeviceInfo;
+
+/* Result of RootHeraldClient_CollectPosture. Caller-allocated. */
+typedef struct {
+    int has_tpm;                  /* 1 = TPM 2.0 reachable */
+    int is_enrolled;              /* 1 = an attestation key exists locally */
+    int ek_cert_present;          /* 1 = vendor EK certificate found */
+    int secure_boot;              /* 1 on, 0 off, -1 undetermined */
+    int oem_keyed;                /* 1 known-OEM PK, 0 custom/unknown, -1 undetermined */
+    char oem_name[64];            /* "" when unknown */
+    int boot_log_measurements;    /* measured-boot entries; -1 unavailable */
+    int boot_log_revoked;         /* dbx-revoked entries; -1 unavailable */
+    char device_id[129];          /* deterministic local id, "" if underivable */
+    char detail_json[2048];       /* machine-readable detail snapshot */
+} RootHeraldPosture;
 
 /* ------------------------------------------------------------------ */
 /* Lifecycle                                                          */
@@ -243,6 +257,29 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetLinkToken(
 ROOTHERALD_API RootHeraldStatus RootHeraldClient_GetDeviceInfo(
     RootHeraldClient* client,
     RootHeraldDeviceInfo* out_result);
+
+/**
+ * LOCAL-ONLY device-readiness snapshot: never touches the network.
+ *
+ * Collects everything the device can know about itself without a server
+ * round-trip — TPM reachability, local enrollment, EK certificate
+ * presence, Secure Boot state, OEM platform-key identity, and measured-
+ * boot log counts. This is the free pre-flight check: call it cheaply
+ * (e.g. from a game launcher) before spending a billable Verify /
+ * AttestSession.
+ *
+ * Honesty rule: these are READINESS SIGNALS, not a verdict — the verdict
+ * is always server-side (tenant policy + trust-anchor chain validation),
+ * and is unknowable locally. Never render these signals as "you will
+ * pass".
+ *
+ * Tri-state ints (secure_boot / oem_keyed) use -1 for "undetermined"
+ * (e.g. the TCG event log was unavailable); count fields use -1 for
+ * "unavailable".
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
+    RootHeraldClient* client,
+    RootHeraldPosture* out_result);
 
 /**
  * Elevated-child entry for the Windows TBS activation fallback (public

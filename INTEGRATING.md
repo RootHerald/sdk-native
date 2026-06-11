@@ -92,6 +92,33 @@ macOS the entry points compile and link but return `ROOTHERALD_ERR_INTERNAL`
 ("not implemented on this platform yet") until the per-platform
 implementations land. `RootHeraldClient_Verify` works on all three.
 
+## Pre-flight check: `RootHeraldClient_CollectPosture`
+
+`RootHeraldClient_CollectPosture` is a **local-only** device-readiness
+snapshot — it never touches the network. Use it to cheaply test whether a
+device is ready to attest (TPM reachable, locally enrolled, vendor EK cert
+present, Secure Boot on, known-OEM platform key, measured-boot log counts)
+before spending a billable `Verify` / `AttestSession`. A game launcher,
+for example, can gate its "Verify this device" button on it, or surface
+"what will the server see?" diagnostics to the user for free.
+
+```c
+RootHeraldPosture p;
+if (RootHeraldClient_CollectPosture(c, &p) == ROOTHERALD_OK) {
+    /* p.has_tpm / p.is_enrolled / p.ek_cert_present are 0/1.
+     * p.secure_boot / p.oem_keyed are 1 / 0 / -1 (undetermined).
+     * p.boot_log_measurements / p.boot_log_revoked are counts, -1 when
+     * the TCG event log is unavailable.
+     * p.detail_json carries the machine-readable snapshot. */
+}
+```
+
+**Honesty rule:** these are *readiness signals*, never a verdict. The
+verdict is always server-side — tenant policy and trust-anchor chain
+validation are unknowable locally — so never render posture output as
+"you will pass". Implemented on **Windows** today; the Linux/macOS stubs
+return `ROOTHERALD_ERR_INTERNAL` like the rest of the session surface.
+
 ## Hosting requirement: `--establish-key` (Windows)
 
 Windows TBS only permits raw TPM 2.0 credential activation
@@ -231,7 +258,8 @@ implementation must be thread-safe.
 
 No heap-allocated values cross the ABI. All result structs
 (`RootHeraldVerifyResult`, `RootHeraldEnrollResult`,
-`RootHeraldAttestResult`, `RootHeraldDeviceInfo`) are caller-allocated;
+`RootHeraldAttestResult`, `RootHeraldDeviceInfo`,
+`RootHeraldPosture`) are caller-allocated;
 the library only writes into them. All handles are opaque and must be
 paired with `RootHeraldClient_Destroy`.
 
