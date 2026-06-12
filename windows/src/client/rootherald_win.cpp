@@ -156,14 +156,14 @@ static std::vector<uint8_t> Sha1(const uint8_t* data, size_t len)
     return out;
 }
 
-// Compute the deterministic deviceId the server derives from this TPM's EK,
-// so an attest can self-bind a /try session without the deviceId having to
-// flow from the (possibly no-op) enroll step.
+// Format the deterministic deviceId from an EK fingerprint, so an attest can
+// self-bind a /try session without the deviceId having to flow from the
+// (possibly no-op) enroll step. The cert-first choice of which fingerprint to
+// hash lives in DeriveLocalDeviceId; this helper only does the formatting.
 //
 // Must match RootHerald.Core Device.IdFromEkFingerprint exactly:
-//   fingerprint = SHA-256(ekPublicKey)              (firmware TPM, no EK cert)
-//   id16        = SHA-1(namespace || fingerprint)[:16], v5 + RFC4122 variant
-//   string      = .NET Guid formatting (first three groups byte-swapped)
+//   id16   = SHA-1(namespace || fingerprint)[:16], v5 + RFC4122 variant
+//   string = .NET Guid formatting (first three groups byte-swapped)
 static std::string ComputeDeviceIdFromFingerprint(const std::vector<uint8_t>& fingerprint);
 
 // Forward declaration — defined with the enroll helpers below.
