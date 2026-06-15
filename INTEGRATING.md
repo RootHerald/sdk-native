@@ -46,6 +46,13 @@ int main(void) {
 
 A runnable copy of the above lives under `samples/minimal/<platform>/`.
 
+> **Platform support.** The quickstart above is fully functional on
+> **Windows** only (and there only as developer-dogfooded — not yet validated
+> by an external integrator). On **Linux** and **macOS**, one-call `Verify` is
+> still **in development**: the non-mock path returns `ROOTHERALD_ERR_INTERNAL`
+> ("not yet implemented") because it is not wired to the real server protocol
+> yet. See "Session-based attestation" below for the full breakdown.
+
 ## Session-based attestation (server-challenge flow)
 
 `RootHeraldClient_Verify` is the one-call, client-initiated path. For flows
@@ -87,10 +94,21 @@ Every enroll/activate/attest request issued through a client handle carries
 the handle's publishable key as the `X-RootHerald-Site-Key` header, so the
 attestation is attributed (and billed) to your tenant.
 
-The session surface is fully implemented on **Windows** today. On Linux and
-macOS the entry points compile and link but return `ROOTHERALD_ERR_INTERNAL`
+The session surface is implemented on **Windows** today (developer-dogfooded
+against the real TPM; not yet externally validated). On Linux and macOS the
+entry points compile and link but return `ROOTHERALD_ERR_INTERNAL`
 ("not implemented on this platform yet") until the per-platform
-implementations land. `RootHeraldClient_Verify` works on all three.
+implementations land.
+
+The same is true of the one-call `RootHeraldClient_Verify`: it is functional
+only on **Windows**. On **Linux** and **macOS** the non-mock path is NOT yet
+wired to the real server protocol (it needs a server-created session and
+server-issued nonce; on macOS the Secure Enclave attestation is also not yet
+server-verified), so it returns `ROOTHERALD_ERR_INTERNAL` with a "not yet
+implemented" reason rather than a verdict. The only Linux/macOS path that
+returns an `ALLOW` today is explicit mock mode
+(`RootHeraldClient_SetMockTpm`), which yields a canned result for CI and is
+never a real verdict.
 
 ## Pre-flight check: `RootHeraldClient_CollectPosture`
 

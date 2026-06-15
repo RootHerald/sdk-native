@@ -1,19 +1,30 @@
 # Root Herald — Native SDK
 
 Embeddable static library for hardware-rooted device attestation. You link it
-into your native app, call `Verify`, and get back a signed verdict tied to the
-device's TPM (Windows/Linux) or Secure Enclave (macOS). One C ABI, declared in
-[`common/rootherald.h`](./common/rootherald.h); all platforms implement it.
+into your native app and call `Verify` to get back a verdict tied to the
+device's TPM (Windows) or Secure Enclave (macOS). One C ABI, declared in
+[`common/rootherald.h`](./common/rootherald.h); all platforms expose it, but
+not all platforms have a working `Verify` yet — see the status column.
 
 ## Platforms
 
 | Platform | Language | Hardware path | Artifact | Status |
 |---|---|---|---|---|
-| Windows | C++20 | NCrypt PCP + raw TBS | `RootHerald.lib` | GA |
-| Linux | C11 | tpm2-tss ESAPI | `librootherald.a` | Beta |
-| macOS | Obj-C | Secure Enclave | `librootherald.a` | Beta |
+| Windows | C++20 | NCrypt PCP + raw TBS | `RootHerald.lib` | Working (dogfooded on this developer's hardware against the real TPM; not yet third-party-validated) |
+| Linux | C11 | tpm2-tss ESAPI | `librootherald.a` | **In development — one-call `Verify` NOT functional** (TPM evidence collection exists; the server-driven session flow that `Verify` needs is not wired up) |
+| macOS | Obj-C | Secure Enclave | `librootherald.a` | **In development — one-call `Verify` NOT functional** (Secure Enclave key attestation is not yet server-verified) |
 | Android | Kotlin | Hardware Key Attestation | AAR | Deferred |
 | iOS | Swift | App Attest | Swift Package | Deferred |
+
+> **What works today.** Only the **Windows** `Verify` performs a real,
+> server-authoritative attestation (and only as developer-dogfooded — it has
+> not been validated by an external integrator). On **Linux** and **macOS**,
+> non-mock `RootHeraldClient_Verify` returns `ROOTHERALD_ERR_INTERNAL` with a
+> "not yet implemented" reason rather than a verdict: the one-call flow is not
+> wired to the real server protocol (which needs a server-created session and
+> server-issued nonce). The mock path (`RootHeraldClient_SetMockTpm`) returns a
+> canned `ALLOW` for CI only — it is not a real verdict and must never be used
+> in production.
 
 ## Layout
 
@@ -70,6 +81,10 @@ if (RootHeraldClient_Verify(c, "game-launch", &r) == ROOTHERALD_OK) {
 }
 RootHeraldClient_Destroy(c);
 ```
+
+This works on **Windows** today. On **Linux** and **macOS** the same call
+currently returns `ROOTHERALD_ERR_INTERNAL` ("not yet implemented") unless you
+opt into mock mode — see the platform status table above before integrating.
 
 Runnable copies live under [`samples/minimal/`](./samples/). For linking,
 ABI/threading/memory contracts, and per-platform notes, see

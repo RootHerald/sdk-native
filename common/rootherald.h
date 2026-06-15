@@ -188,7 +188,7 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetMockTpm(
 /* ------------------------------------------------------------------ */
 
 /**
- * Collect fresh attestation evidence and POST it to {endpoint}/api/v1/attestations/verify.
+ * Collect fresh attestation evidence and obtain a server-authoritative verdict.
  *   action       : the relying-party-defined action being authorized
  *                  (e.g. "game-launch", "transfer-funds"). NULL → "default".
  *   out_result   : caller-allocated; fields are populated on ROOTHERALD_OK.
@@ -196,6 +196,14 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetMockTpm(
  * Returns ROOTHERALD_OK iff the server returned an authoritative verdict.
  * Network and server errors return distinct codes so the caller can
  * fail-open or fail-closed per policy.
+ *
+ * PLATFORM SUPPORT (important): this one-call flow is functional only on
+ * Windows today. On Linux and macOS it is NOT yet wired to the real server
+ * protocol (which requires a server-created session and server-issued nonce);
+ * the non-mock path returns ROOTHERALD_ERR_INTERNAL with a "not yet
+ * implemented" reason instead of a verdict. The mock path
+ * (RootHeraldClient_SetMockTpm) returns a canned ALLOW for CI only — never a
+ * real verdict.
  */
 ROOTHERALD_API RootHeraldStatus RootHeraldClient_Verify(
     RootHeraldClient* client,
