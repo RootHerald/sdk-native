@@ -31,7 +31,7 @@ struct RootHeraldClient {
     pthread_mutex_t lock;
 };
 
-static const char* const kAbiVersion = "1.2";
+static const char* const kAbiVersion = "1.3";
 static const char* const kLibraryVersion = "0.2.0";
 static const char* const kDefaultEndpoint = "https://rootherald.io";
 
@@ -202,6 +202,33 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_Verify(
                 "(requires the server-driven session flow); use mock mode for CI only");
     pthread_mutex_unlock(&client->lock);
     return ROOTHERALD_ERR_INTERNAL;
+}
+
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectEvidence(
+    const char* nonce_b64, char** out_evidence_json)
+{
+    /* Background-Check "dumb client" (contract C5, ABI 1.3). Keyless,
+     * handle-less, no network call by contract.
+     *
+     * TODO(linux): wire the real collector. The Linux legacy path
+     * (rootherald_linux.c, tpm2-tss ESAPI) already gathers a TPM2_Quote over a
+     * nonce plus EK chain for RootHeraldAttest; factor that collection portion
+     * out (exactly as the Windows RootHeraldCollectEvidence does over
+     * CollectEvidenceFields) so it returns the AttestationRequest-shaped
+     * evidence blob WITHOUT the POST. Until then, return the same
+     * not-implemented signal the other Linux session entry points use, so the
+     * ABI is uniform across platforms but never fabricates evidence. */
+    if (out_evidence_json) *out_evidence_json = NULL;
+    if (!nonce_b64 || !nonce_b64[0] || !out_evidence_json)
+        return ROOTHERALD_ERR_INVALID_ARG;
+    return ROOTHERALD_ERR_INTERNAL; /* not implemented on Linux yet */
+}
+
+ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json)
+{
+    /* Caller-frees ownership; matches the Windows implementation so the same
+     * embedder code is portable. free(NULL) is a no-op. */
+    free(evidence_json);
 }
 
 ROOTHERALD_API const char* RootHerald_AbiVersionString(void)

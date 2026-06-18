@@ -33,7 +33,7 @@ struct RootHeraldClient {
     pthread_mutex_t lock;
 };
 
-static const char* const kAbiVersion = "1.2";
+static const char* const kAbiVersion = "1.3";
 static const char* const kLibraryVersion = "0.2.0";
 static const char* const kDefaultEndpoint = "https://rootherald.io";
 
@@ -190,6 +190,33 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_Verify(
                 "(Secure Enclave attestation is not server-verified); use mock mode for CI only");
     pthread_mutex_unlock(&client->lock);
     return ROOTHERALD_ERR_INTERNAL;
+}
+
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectEvidence(
+    const char* nonce_b64, char** out_evidence_json)
+{
+    /* Background-Check "dumb client" (contract C5, ABI 1.3). Keyless,
+     * handle-less, no network call by contract.
+     *
+     * TODO(macos): macOS is "reduced" assurance — Secure Enclave, no TPM, no
+     * PCRs, no TPM2_Quote. When the Secure Enclave evidence collector lands
+     * (rootherald_macos.m), factor its collection portion out to return the
+     * evidence blob WITHOUT a network call (mirroring the Windows
+     * RootHeraldCollectEvidence over CollectEvidenceFields). Do NOT invent a TPM
+     * quote path that does not exist here. Until the SE collector lands, return
+     * the same not-implemented signal the other macOS session entry points use,
+     * so the ABI stays uniform without fabricating evidence. */
+    if (out_evidence_json) *out_evidence_json = NULL;
+    if (!nonce_b64 || !nonce_b64[0] || !out_evidence_json)
+        return ROOTHERALD_ERR_INVALID_ARG;
+    return ROOTHERALD_ERR_INTERNAL; /* not implemented on macOS yet */
+}
+
+ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json)
+{
+    /* Caller-frees ownership; matches the Windows implementation. free(NULL) is
+     * a no-op. */
+    free(evidence_json);
 }
 
 ROOTHERALD_API const char* RootHerald_AbiVersionString(void)  { return kAbiVersion; }
