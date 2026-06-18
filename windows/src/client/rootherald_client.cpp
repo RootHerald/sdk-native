@@ -29,6 +29,9 @@ extern "C" RootHeraldResult RootHeraldAttest(const char* server_url, const char*
                                              RootHeraldAttestationInfo* out_info);
 extern "C" RootHeraldResult RootHeraldGetStatus(RootHeraldDeviceStatus* out_status);
 extern "C" RootHeraldResult RootHeraldCollectLocalPosture(RootHeraldPosture* out_posture);
+extern "C" RootHeraldResult RootHeraldCollectEvidence(const char* nonce_b64,
+                                                      char** out_evidence_json);
+extern "C" void RootHeraldFreeEvidence(char* evidence_json);
 extern "C" void RootHeraldSetLinkToken(const char* link_token);
 extern "C" void RootHeraldSetDeviceId(const char* device_id);
 extern "C" int RootHeraldRunElevatedEstablishKey(const char* server_url,
@@ -36,7 +39,7 @@ extern "C" int RootHeraldRunElevatedEstablishKey(const char* server_url,
 
 namespace {
 
-constexpr const char* kAbiVersion = "1.2";
+constexpr const char* kAbiVersion = "1.3";
 constexpr const char* kLibraryVersion = "0.2.0";  // bumped when public ABI stabilises
 constexpr const char* kDefaultEndpoint = "https://rootherald.io";
 
@@ -426,6 +429,28 @@ extern "C" ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
     // LOCAL-ONLY: never touches the network, so no site key is installed.
     // Readiness signals, not a verdict — the verdict is always server-side.
     return MapRootHeraldStatus(RootHeraldCollectLocalPosture(out_result));
+}
+
+extern "C" ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectEvidence(
+    const char* nonce_b64, char** out_evidence_json)
+{
+    // Background-Check "dumb client" (contract C5, ABI 1.3). HANDLE-LESS and
+    // KEYLESS by design: no RootHeraldClient* is required because no api/site
+    // key is consulted and no RootHerald network call is made. The internal
+    // collector installs NO X-RootHerald-Site-Key header (it never POSTs at
+    // all), so a customer can use this without ever calling
+    // RootHeraldClient_Create. The embedder relays the returned blob to the
+    // CUSTOMER's server, which appraises it via POST /api/v1/attestations/verify.
+    if (out_evidence_json == nullptr) return ROOTHERALD_ERR_INVALID_ARG;
+    *out_evidence_json = nullptr;
+    if (nonce_b64 == nullptr || nonce_b64[0] == '\0') return ROOTHERALD_ERR_INVALID_ARG;
+
+    return MapRootHeraldStatus(RootHeraldCollectEvidence(nonce_b64, out_evidence_json));
+}
+
+extern "C" ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json)
+{
+    RootHeraldFreeEvidence(evidence_json);
 }
 
 extern "C" ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(

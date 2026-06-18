@@ -36,7 +36,9 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <shellapi.h>
+#include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -704,35 +706,49 @@ static std::unique_ptr<RootHerald::IAttestationKeyProvider> SelectEnrolledProvid
     return nullptr;
 }
 
-RootHeraldResult RootHeraldAttest(
-    const char* server_url,
-    const char* session_id,
+// ===========================================================================
+// Shared evidence collection (Background-Check WP6).
+//
+// CollectEvidenceFields runs the on-device collection portion that was
+// previously fused inline into RootHeraldAttest — find the enrolled AK, open a
+// TBS context, read PCRs, TPM2_Quote over the caller's nonce, parse the TCG
+// event log + Secure Boot chain, and gather the EK cert + intermediate chain —
+// and returns the assembled evidence as a key/value map. It performs NO network
+// call and requires NO API/site key. Both the Passport direct-POST path
+// (RootHeraldAttest) and the dumb-client collect-only path
+// (RootHeraldCollectEvidence) build on this so the evidence shape is identical.
+//
+// The map it produces is exactly the AttestationRequest-shaped evidence object
+// the server's background-check POST /api/v1/attestations/verify expects in its
+// `evidence` field (and the same the Passport POST /api/v1/attest expects),
+// MINUS the Passport-only `sessionId` / `linkToken` fields, which the caller
+// adds afterward (RootHeraldAttest does; the dumb-client collect must NOT).
+//
+// On failure it writes a short reason into out_reason and returns the matching
+// RootHeraldResult; on success it returns RH_PROTO_OK with out_fields populated.
+// ===========================================================================
+static RootHeraldResult CollectEvidenceFields(
     const char* nonce_b64,
-    size_t /*nonce_len*/,
-    RootHeraldAttestationInfo* out_info)
+    std::map<std::string, std::string>& out_fields,
+    std::string& out_reason)
 {
-    if (!server_url || !session_id || !nonce_b64 || !out_info)
-        return RH_PROTO_ERR_INVALID_PARAM;
-    memset(out_info, 0, sizeof(RootHeraldAttestationInfo));
+    out_fields.clear();
+    out_reason.clear();
 
     // 1. Find the backend holding the enrolled AK. NOT_ENROLLED lets the
     //    native host's eviction-tolerant auto-recovery kick in (re-enroll +
     //    retry) instead of a hard failure.
     auto provider = SelectEnrolledProvider();
     if (!provider) {
-        RH_LOG_WARN("[attest] no enrolled AK on any backend -- not enrolled\n");
-        strncpy_s(out_info->session_id, session_id, _TRUNCATE);
-        strncpy_s(out_info->status, "failed", _TRUNCATE);
-        strncpy_s(out_info->failure_reason, "Not enrolled", _TRUNCATE);
+        RH_LOG_WARN("[collect] no enrolled AK on any backend -- not enrolled\n");
+        out_reason = "Not enrolled";
         return RH_PROTO_ERR_NOT_ENROLLED;
     }
-    RH_LOG_WARN("[attest] using %s backend\n", provider->ModeName());
+    RH_LOG_WARN("[collect] using %s backend\n", provider->ModeName());
     uint32_t akHandle = provider->GetQuoteHandle();
     if (!akHandle) {
-        RH_LOG_WARN("[attest] could not resolve AK quote handle (mode=%s)\n", provider->ModeName());
-        strncpy_s(out_info->session_id, session_id, _TRUNCATE);
-        strncpy_s(out_info->status, "failed", _TRUNCATE);
-        strncpy_s(out_info->failure_reason, "AK handle unavailable", _TRUNCATE);
+        RH_LOG_WARN("[collect] could not resolve AK quote handle (mode=%s)\n", provider->ModeName());
+        out_reason = "AK handle unavailable";
         return RH_PROTO_ERR_ATTESTATION_FAILED;
     }
 
@@ -742,12 +758,16 @@ RootHeraldResult RootHeraldAttest(
     //    dependent (PCP mode is not reachable on firmwares where activation
     //    falls back to TBS, which is where this is exercised today).
     RootHerald::TpmCommands tpmCmd;
-    if (!tpmCmd.Open())
+    if (!tpmCmd.Open()) {
+        out_reason = "TPM unavailable";
         return RH_PROTO_ERR_NO_TPM;
+    }
 
     auto nonce = Base64Decode(std::string(nonce_b64));
-    if (nonce.empty())
+    if (nonce.empty()) {
+        out_reason = "Invalid nonce";
         return RH_PROTO_ERR_INVALID_PARAM;
+    }
 
     // 3. Read PCR values (fail loudly).
     std::vector<uint32_t> pcrs = {0, 1, 2, 3, 4, 7};
@@ -756,10 +776,8 @@ RootHeraldResult RootHeraldAttest(
     for (uint32_t idx : pcrs) {
         auto pcrVal = tpmCmd.PcrRead(idx);
         if (pcrVal.empty()) {
-            RH_LOG_WARN("[attest] PcrRead(%u) failed -- aborting\n", idx);
-            strncpy_s(out_info->session_id, session_id, _TRUNCATE);
-            strncpy_s(out_info->status, "failed", _TRUNCATE);
-            strncpy_s(out_info->failure_reason, "PCR read failed", _TRUNCATE);
+            RH_LOG_WARN("[collect] PcrRead(%u) failed -- aborting\n", idx);
+            out_reason = "PCR read failed";
             return RH_PROTO_ERR_ATTESTATION_FAILED;
         }
         if (!first) pcrValuesJson += ",";
@@ -768,13 +786,14 @@ RootHeraldResult RootHeraldAttest(
     }
     pcrValuesJson += "}}";
 
-    // 4. TPM2_Quote against the loaded AK.
+    // 4. TPM2_Quote against the loaded AK — bound to the CALLER'S nonce. This is
+    //    the freshness/anti-replay binding: the nonce is signed inside the quote,
+    //    so it is transport-agnostic (relaying the blob through the customer's
+    //    server preserves the binding exactly).
     std::vector<uint8_t> quoted, signature;
     if (!tpmCmd.Quote(akHandle, nonce, pcrs, quoted, signature)) {
-        RH_LOG_WARN("[attest] TPM2_Quote failed\n");
-        strncpy_s(out_info->session_id, session_id, _TRUNCATE);
-        strncpy_s(out_info->status, "failed", _TRUNCATE);
-        strncpy_s(out_info->failure_reason, "Quote failed", _TRUNCATE);
+        RH_LOG_WARN("[collect] TPM2_Quote failed\n");
+        out_reason = "Quote failed";
         return RH_PROTO_ERR_ATTESTATION_FAILED;
     }
     std::string quoteJson = RootHerald::JsonBuild({
@@ -807,9 +826,11 @@ RootHeraldResult RootHeraldAttest(
         });
     }
 
-    // 6. POST /attest.
-    std::map<std::string, std::string> bodyFields = {
-        {"sessionId", session_id},
+    // 6. Assemble the evidence map. NOTE: the Passport-only `sessionId` /
+    //    `linkToken` fields are deliberately NOT added here — RootHeraldAttest
+    //    adds them for the direct-POST path; the dumb-client collect path leaves
+    //    them out (the freshness nonce comes from the customer's challenge).
+    out_fields = {
         {"pcrValues", pcrValuesJson},
         {"quote", quoteJson},
         {"secureBootChain", secureBootJson}
@@ -818,7 +839,7 @@ RootHeraldResult RootHeraldAttest(
     // parse and bind it to the signed quote (replayed PCRs must match the quoted
     // PCRs). Without this the server can't trust any boot-state posture.
     if (!eventLog.empty())
-        bodyFields["eventLog"] = Base64Encode(eventLog.data(), eventLog.size());
+        out_fields["eventLog"] = Base64Encode(eventLog.data(), eventLog.size());
 
     // EK evidence: the genuine vendor-signed EK certificate (+ On-Die CA
     // intermediates from NV) so the server can (re)classify this device's TPM
@@ -828,7 +849,7 @@ RootHeraldResult RootHeraldAttest(
     {
         auto ekCertDer = ReadEkCertFromWindowsStore();
         if (ekCertDer.size() > 32)
-            bodyFields["ekCertPem"] = DerToPem(ekCertDer);
+            out_fields["ekCertPem"] = DerToPem(ekCertDer);
         std::vector<std::vector<uint8_t>> ekChain;
         tpmCmd.ReadIntelOdcaIntermediates(ekChain);
         if (!ekChain.empty()) {
@@ -841,17 +862,61 @@ RootHeraldResult RootHeraldAttest(
                 arr += "\"" + esc + "\"";
             }
             arr += "]";
-            bodyFields["ekCertificateChain"] = arr;
+            out_fields["ekCertificateChain"] = arr;
         }
     }
-    // Bind the device to the session. The tray sets g_deviceId for user-bound
-    // flows; otherwise derive it from the EK so an unbound /try session
+    // Bind the device to the evidence. The tray sets g_deviceId for user-bound
+    // flows; otherwise derive it from the EK so an unbound session
     // (DeviceId left null at challenge time) resolves to this device — the
-    // server recomputes the same id from the stored EK fingerprint.
+    // server recomputes the same id from the stored EK fingerprint. The server's
+    // /verify requires DeviceId to identify an enrolled device in the tenant.
     std::string deviceId = g_deviceId;
     if (deviceId.empty()) deviceId = DeriveLocalDeviceId();
-    if (!deviceId.empty()) bodyFields["deviceId"] = deviceId;
+    if (!deviceId.empty()) out_fields["deviceId"] = deviceId;
+
+    return RH_PROTO_OK;
+}
+
+// Passport / badge-tier fallback (RATS Passport model): the device collects
+// evidence AND POSTs it directly to RootHerald with the tenant's publishable
+// site key (installed by the ScopedSiteKey facade). Kept for the backend-less
+// badge tier, which cannot hold an rh_sk_ secret key. The dumb-client
+// Background-Check path (RootHeraldCollectEvidence) returns the same evidence
+// to the embedder WITHOUT this POST and WITHOUT any key.
+RootHeraldResult RootHeraldAttest(
+    const char* server_url,
+    const char* session_id,
+    const char* nonce_b64,
+    size_t /*nonce_len*/,
+    RootHeraldAttestationInfo* out_info)
+{
+    if (!server_url || !session_id || !nonce_b64 || !out_info)
+        return RH_PROTO_ERR_INVALID_PARAM;
+    memset(out_info, 0, sizeof(RootHeraldAttestationInfo));
+
+    // Collect the evidence (no key, no network) via the shared collector.
+    std::map<std::string, std::string> bodyFields;
+    std::string reason;
+    RootHeraldResult collect = CollectEvidenceFields(nonce_b64, bodyFields, reason);
+    if (collect != RH_PROTO_OK) {
+        strncpy_s(out_info->session_id, session_id, _TRUNCATE);
+        strncpy_s(out_info->status, "failed", _TRUNCATE);
+        strncpy_s(out_info->failure_reason,
+                  reason.empty() ? "evidence collection failed" : reason.c_str(),
+                  _TRUNCATE);
+        // NO_TPM is surfaced as its own code, mirroring the prior behaviour.
+        return collect;
+    }
+
+    // Passport-only fields: bind the evidence to the server-created session and
+    // (optionally) consume a one-shot link token. These are NOT part of the
+    // dumb-client Background-Check evidence — that path's freshness comes from
+    // the customer's relayed challenge nonce instead of a RootHerald session.
+    bodyFields["sessionId"] = session_id;
     if (!g_linkToken.empty()) { bodyFields["linkToken"] = g_linkToken; g_linkToken.clear(); }
+
+    // POST /attest (Passport direct path; carries X-RootHerald-Site-Key when the
+    // facade installed one).
     auto resp = RootHerald::HttpPost(std::string(server_url) + "/api/v1/attest",
                                      RootHerald::JsonBuild(bodyFields));
     RH_LOG_WARN("[attest] Response: %d, body: %.300s\n", resp.statusCode, resp.body.c_str());
@@ -876,6 +941,49 @@ RootHeraldResult RootHeraldAttest(
     strncpy_s(out_info->redirect_uri, RootHerald::JsonGet(resp.body, "redirectUri").c_str(), _TRUNCATE);
     strncpy_s(out_info->failure_reason, RootHerald::JsonGet(resp.body, "reason").c_str(), _TRUNCATE);
     return status == "verified" ? RH_PROTO_OK : RH_PROTO_ERR_ATTESTATION_FAILED;
+}
+
+// ===========================================================================
+// Dumb-client collect-only entry (Background-Check WP6, contract C5).
+//
+// Backs the public RootHeraldClient_CollectEvidence. Collects the SAME
+// self-contained evidence blob the Passport collector assembles before its
+// POST (quote over the caller's nonce, EK pub cert + chain, PCRs, event log,
+// secure-boot chain — minus the Passport-only sessionId/linkToken) and returns
+// it as a heap-allocated JSON string to the embedder, who hands it to the
+// CUSTOMER's server for relay to POST /api/v1/attestations/verify.
+//
+// NO network call. NO API/site key required (the legacy global path has never
+// owned a key, and CollectEvidenceFields installs none). The returned buffer is
+// caller-owned; free it with RootHeraldFreeEvidence.
+// ===========================================================================
+extern "C" ROOTHERALD_API RootHeraldResult RootHeraldCollectEvidence(
+    const char* nonce_b64, char** out_evidence_json)
+{
+    if (!nonce_b64 || !out_evidence_json)
+        return RH_PROTO_ERR_INVALID_PARAM;
+    *out_evidence_json = nullptr;
+
+    std::map<std::string, std::string> fields;
+    std::string reason;
+    RootHeraldResult r = CollectEvidenceFields(nonce_b64, fields, reason);
+    if (r != RH_PROTO_OK) {
+        RH_LOG_WARN("[collect-evidence] failed: %s\n", reason.c_str());
+        return r;
+    }
+
+    std::string json = RootHerald::JsonBuild(fields);
+    char* buf = (char*)malloc(json.size() + 1);
+    if (!buf) return RH_PROTO_ERR_INTERNAL;
+    memcpy(buf, json.c_str(), json.size() + 1);
+    *out_evidence_json = buf;
+    return RH_PROTO_OK;
+}
+
+// Free a buffer returned by RootHeraldCollectEvidence. Safe to call with NULL.
+extern "C" ROOTHERALD_API void RootHeraldFreeEvidence(char* evidence_json)
+{
+    free(evidence_json);
 }
 
 void RootHeraldSetLinkToken(const char* link_token)

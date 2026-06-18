@@ -155,6 +155,38 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
     return ROOTHERALD_OK;
 }
 
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectEvidence(
+    const char* nonce_b64, char** out_evidence_json)
+{
+    /* Background-Check "dumb client" (contract C5, ABI 1.3). Canned mock
+     * evidence — same convention as the other stub entry points: never touches
+     * hardware or the network. The blob echoes the relayed nonce so a test
+     * harness can assert round-trip wiring. Caller frees via
+     * RootHeraldClient_FreeEvidence. NEVER ship the stub in production. */
+    if (!out_evidence_json) return ROOTHERALD_ERR_INVALID_ARG;
+    *out_evidence_json = NULL;
+    if (!nonce_b64 || !nonce_b64[0]) return ROOTHERALD_ERR_INVALID_ARG;
+
+    const char* prefix = "{\"stub\":true,\"deviceId\":"
+                         "\"00000000-0000-4000-8000-000000000stub\","
+                         "\"quote\":{\"nonce\":\"";
+    const char* suffix = "\"}}";
+    size_t n = strlen(prefix) + strlen(nonce_b64) + strlen(suffix) + 1;
+    char* buf = (char*)malloc(n);
+    if (!buf) return ROOTHERALD_ERR_INTERNAL;
+    buf[0] = '\0';
+    strcat(buf, prefix);
+    strcat(buf, nonce_b64);
+    strcat(buf, suffix);
+    *out_evidence_json = buf;
+    return ROOTHERALD_OK;
+}
+
+ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json)
+{
+    free(evidence_json);
+}
+
 ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(
     const char* server_url, const char* result_path)
 {
@@ -163,5 +195,5 @@ ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(
     return 0;
 }
 
-ROOTHERALD_API const char* RootHerald_AbiVersionString(void)  { return "1.2"; }
+ROOTHERALD_API const char* RootHerald_AbiVersionString(void)  { return "1.3"; }
 ROOTHERALD_API const char* RootHerald_LibraryVersionString(void) { return "stub-0.2.0"; }

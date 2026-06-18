@@ -38,7 +38,22 @@
 #include <stddef.h>
 
 #define ROOTHERALD_ABI_VERSION_MAJOR 1
-#define ROOTHERALD_ABI_VERSION_MINOR 2
+#define ROOTHERALD_ABI_VERSION_MINOR 3
+
+/*
+ * ABI changelog
+ * -------------
+ * 1.3 — ADDED RootHeraldClient_CollectEvidence + RootHeraldClient_FreeEvidence
+ *       (Background-Check "dumb client", contract C5). Additive only; every
+ *       1.2 symbol is unchanged. Collect-only: NO API/site key required and NO
+ *       RootHerald network call — returns the self-contained evidence blob to
+ *       the embedder, who hands it to the CUSTOMER's server (which relays it
+ *       server→server to POST /api/v1/attestations/verify). The existing
+ *       key-bearing Create / AttestSession / Verify entry points remain for the
+ *       Passport / "badge" tier (backend-less customers that POST directly to
+ *       RootHerald with a publishable key).
+ * 1.2 — RootHeraldClient_CollectPosture (local-only readiness snapshot).
+ */
 
 /*
  * Linkage model (Wave 6 — static library)
@@ -288,6 +303,67 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_GetDeviceInfo(
 ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
     RootHeraldClient* client,
     RootHeraldPosture* out_result);
+
+/* ------------------------------------------------------------------ */
+/* Background-Check collect-only (contract C5, ABI 1.3)               */
+/* ------------------------------------------------------------------ */
+/*
+ * The "dumb client" surface for the RATS Background-Check model. The on-device
+ * client collects a self-contained evidence blob and returns it to the embedder
+ * — it makes NO RootHerald network call and needs NO API/site key. The embedder
+ * hands the blob to the CUSTOMER's own server, which relays it server→server
+ * (authenticated with its rh_sk_ secret key) to
+ * `POST /api/v1/attestations/verify`, where RootHerald appraises it and returns
+ * a verdict.
+ *
+ * This is the privacy-/liability-preferred default: no client-side secret can
+ * leak, and the customer's server is the trust boundary. The key-bearing
+ * Passport entry points (RootHeraldClient_Create / _AttestSession / _Verify)
+ * stay for the backend-less "badge" tier, which cannot hold a secret key in a
+ * browser and so POSTs to RootHerald directly with a publishable key.
+ */
+
+/**
+ * Collect attestation evidence WITHOUT contacting RootHerald and WITHOUT
+ * requiring an API key.
+ *
+ *   nonce_b64         : the server-issued challenge nonce (base64, NUL-
+ *                       terminated) the customer obtained from
+ *                       `POST /api/v1/attestations/challenge` and relayed to
+ *                       this client. The TPM quote is taken OVER this nonce, so
+ *                       freshness / anti-replay is preserved end-to-end exactly
+ *                       as on the direct path (the nonce is bound inside the
+ *                       signature). Required.
+ *   out_evidence_json : on ROOTHERALD_OK, receives a newly-allocated,
+ *                       NUL-terminated JSON string — the self-contained evidence
+ *                       blob. This is EXACTLY the object the server's
+ *                       `/attestations/verify` expects in its `evidence` field
+ *                       (the same AttestationRequest-shaped payload the collector
+ *                       produces for the Passport `/attest` POST, MINUS the
+ *                       Passport-only `sessionId` / `linkToken` fields). The
+ *                       customer's server forwards it verbatim. The caller OWNS
+ *                       the buffer and MUST free it with
+ *                       RootHeraldClient_FreeEvidence. Set to NULL on any error.
+ *
+ * No RootHeraldClient_Create api_key is consulted — this call collects only.
+ * Returns ROOTHERALD_OK on success; ROOTHERALD_ERR_NOT_ENROLLED if no enrolled
+ * attestation key exists on the device; ROOTHERALD_ERR_TPM_UNAVAILABLE /
+ * ROOTHERALD_ERR_SERVER on a TPM / quote failure; ROOTHERALD_ERR_INVALID_ARG on
+ * a bad argument.
+ *
+ * PLATFORM SUPPORT: functional on Windows. Linux and macOS declare the entry
+ * point (so the ABI is uniform) but return ROOTHERALD_ERR_INTERNAL until their
+ * per-platform collectors land — consistent with the other session entry points.
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectEvidence(
+    const char* nonce_b64,
+    char** out_evidence_json);
+
+/**
+ * Free an evidence buffer returned by RootHeraldClient_CollectEvidence. Safe to
+ * call with NULL. Pairs with the caller-frees ownership of out_evidence_json.
+ */
+ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json);
 
 /**
  * Elevated-child entry for the Windows TBS activation fallback (public
