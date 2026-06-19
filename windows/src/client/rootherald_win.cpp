@@ -389,6 +389,37 @@ static bool GatherEkEnrollData(EkEnrollData& out)
     return true;
 }
 
+// Assemble the exact field map for POST /api/v1/devices/enroll from the gathered
+// EK data and the AK public area. Single source of truth so the direct-POST path
+// (RunEnrollFlow) and the page-driven keyless split (RootHeraldEnrollCollect)
+// emit byte-identical enroll request bodies — the server's EK validation +
+// AkTemplateValidator + MakeCredential run on these exact bytes either way.
+// The ekCertificateChain value is a raw JSON array string (JsonBuild embeds it
+// verbatim via its '[' detection); every other value is a plain string.
+static std::map<std::string, std::string> BuildEnrollFields(
+    const EkEnrollData& ek, const std::vector<uint8_t>& akPub)
+{
+    std::map<std::string, std::string> fields = {
+        {"ekPublicKey",  Base64Encode(ek.ekPub.data(), ek.ekPub.size())},
+        {"akPublicArea", Base64Encode(akPub.data(), akPub.size())},
+        {"platform",     "windows"}
+    };
+    if (!ek.ekCertPem.empty()) fields["ekCertPem"] = ek.ekCertPem;
+    if (!ek.intermediates.empty()) {
+        std::string arr = "[";
+        for (size_t i = 0; i < ek.intermediates.size(); ++i) {
+            if (i) arr += ",";
+            std::string pem = DerToPem(ek.intermediates[i]);
+            std::string esc;
+            for (char c : pem) { if (c=='"') esc+="\\\""; else if (c=='\\') esc+="\\\\"; else if (c=='\n') esc+="\\n"; else esc+=c; }
+            arr += "\"" + esc + "\"";
+        }
+        arr += "]";
+        fields["ekCertificateChain"] = arr;
+    }
+    return fields;
+}
+
 enum class EnrollOutcome {
     Ok,             // fully enrolled + activated
     ActivateFailed, // server enroll OK but activation rejected (try other backend)
@@ -430,25 +461,9 @@ static EnrollOutcome RunEnrollFlow(const char* server_url,
     }
     RH_LOG_WARN("[enroll:%s] AK created, pub area %zu bytes\n", provider.ModeName(), akPub.size());
 
-    // POST /enroll
-    std::map<std::string, std::string> fields = {
-        {"ekPublicKey",  Base64Encode(ek.ekPub.data(), ek.ekPub.size())},
-        {"akPublicArea", Base64Encode(akPub.data(), akPub.size())},
-        {"platform",     "windows"}
-    };
-    if (!ek.ekCertPem.empty()) fields["ekCertPem"] = ek.ekCertPem;
-    if (!ek.intermediates.empty()) {
-        std::string arr = "[";
-        for (size_t i = 0; i < ek.intermediates.size(); ++i) {
-            if (i) arr += ",";
-            std::string pem = DerToPem(ek.intermediates[i]);
-            std::string esc;
-            for (char c : pem) { if (c=='"') esc+="\\\""; else if (c=='\\') esc+="\\\\"; else if (c=='\n') esc+="\\n"; else esc+=c; }
-            arr += "\"" + esc + "\"";
-        }
-        arr += "]";
-        fields["ekCertificateChain"] = arr;
-    }
+    // POST /enroll. Built via the shared assembler so the direct-POST path and
+    // the page-driven keyless split (RootHeraldEnrollCollect) post identical bytes.
+    std::map<std::string, std::string> fields = BuildEnrollFields(ek, akPub);
     std::string url = std::string(server_url) + "/api/v1/devices/enroll";
     auto resp = RootHerald::HttpPost(url, RootHerald::JsonBuild(fields));
     RH_LOG_WARN("[enroll:%s] enroll response: %d\n", provider.ModeName(), resp.statusCode);
@@ -984,6 +999,155 @@ extern "C" ROOTHERALD_API RootHeraldResult RootHeraldCollectEvidence(
 extern "C" ROOTHERALD_API void RootHeraldFreeEvidence(char* evidence_json)
 {
     free(evidence_json);
+}
+
+// ===========================================================================
+// Page-driven enrollment split (Background-Check WP4 / Phase 4a, contract
+// C-enroll, ABI 1.4).
+//
+// The enroll ceremony is irreducibly two server round-trips with a TPM op
+// between them:
+//   1. collect EK pub + EK cert chain + create an AK  -> POST /devices/enroll
+//      -> server validates EK + AkTemplate + MakeCredential-seals a secret to
+//         the EK and returns a challenge blob.
+//   2. TPM2_ActivateCredential(challenge) decrypts the secret
+//      -> POST /devices/activate -> server constant-time compares + Name-match
+//         guards -> enrolled.
+//
+// WP7 removed the native host's auto-enroll and the host no longer POSTs to
+// RootHerald. Per WP4 Option A the two round-trips are RELAYED by the page
+// through the CUSTOMER's server (authenticated with its rh_sk_ secret key). So
+// these two entry points do the TPM-only halves and make NO network call and
+// need NO API/site key — mirroring RootHeraldCollectEvidence. The page hands
+// the returned enroll body to its server, gets back the challenge, and hands
+// the challenge to the activate half.
+//
+// SECURITY: this only moves the NETWORK boundary. The EK-chain validation,
+// AkTemplateValidator (closes the software-AK spoof), MakeCredential sealing,
+// the constant-time secret compare, and the activate Name-match guard ALL run
+// server-side on the genuine client bytes exactly as before. The split relays
+// those bytes byte-for-byte; it weakens nothing.
+//
+// Cross-call AK continuity: the AK created in collect must be the same AK that
+// activate runs ActivateCredential against. The two halves may execute in
+// separate host invocations, so collect PERSISTS the freshly-created AK before
+// returning (PersistAk) and activate re-loads it (SelectEnrolledProvider). A
+// persisted-but-unactivated AK is inert — the server never trusts it until the
+// activate round-trip completes the MakeCredential proof.
+//
+// PCP-only by design: the browser/native-messaging path is unprivileged, and
+// the whole point of PCP is unprivileged credential activation (no UAC). The
+// raw-TBS backend needs an elevated process for ActivateCredential
+// (TPM_E_COMMAND_BLOCKED otherwise), which cannot be driven cleanly across two
+// page-relayed calls — that elevated path stays exclusively on the direct
+// RootHeraldEnroll entry for non-browser embedders.
+// ===========================================================================
+
+// Collect EK pub + EK cert chain + create (and persist) an AK; return the exact
+// POST /api/v1/devices/enroll body. NO network call, NO key. Caller owns the
+// buffer; free it with RootHeraldFreeEvidence.
+extern "C" ROOTHERALD_API RootHeraldResult RootHeraldEnrollCollect(
+    char** out_enroll_json)
+{
+    if (!out_enroll_json) return RH_PROTO_ERR_INVALID_PARAM;
+    *out_enroll_json = nullptr;
+
+    EkEnrollData ek;
+    if (!GatherEkEnrollData(ek)) {
+        RH_LOG_WARN("[enroll-collect] EK gather failed\n");
+        return RH_PROTO_ERR_ENROLLMENT_FAILED;
+    }
+
+    // PCP backend only — unprivileged, no UAC. (TBS activation needs elevation
+    // and is not reachable on the page-relayed path; see header note above.)
+    RootHerald::PcpKeyProvider pcp(kPcpAkName);
+    if (!pcp.Open()) {
+        RH_LOG_WARN("[enroll-collect] PCP open failed\n");
+        return RH_PROTO_ERR_ENROLLMENT_FAILED;
+    }
+    if (!pcp.CreateAk()) {
+        RH_LOG_WARN("[enroll-collect] CreateAk failed\n");
+        return RH_PROTO_ERR_ENROLLMENT_FAILED;
+    }
+    auto akPub = pcp.GetAkPublicArea();
+    if (akPub.empty()) {
+        RH_LOG_WARN("[enroll-collect] GetAkPublicArea failed\n");
+        pcp.DeleteAk();
+        return RH_PROTO_ERR_ENROLLMENT_FAILED;
+    }
+
+    // Persist now so the activate half (a possibly-separate invocation) can
+    // re-load the very same AK whose Name the server is about to bind via
+    // MakeCredential. Inert until activate proves the credential.
+    if (!pcp.PersistAk()) {
+        RH_LOG_WARN("[enroll-collect] PersistAk failed\n");
+        pcp.DeleteAk();
+        return RH_PROTO_ERR_ENROLLMENT_FAILED;
+    }
+    WriteCachedMethod(ActivationMethod::Pcp);
+    RH_LOG_WARN("[enroll-collect] AK created+persisted (PCP), pub area %zu bytes\n", akPub.size());
+
+    // Byte-identical to the direct path's enroll body.
+    std::string json = RootHerald::JsonBuild(BuildEnrollFields(ek, akPub));
+    char* buf = (char*)malloc(json.size() + 1);
+    if (!buf) return RH_PROTO_ERR_INTERNAL;
+    memcpy(buf, json.c_str(), json.size() + 1);
+    *out_enroll_json = buf;
+    return RH_PROTO_OK;
+}
+
+// TPM2_ActivateCredential over the server's MakeCredential challenge blob;
+// return the exact POST /api/v1/devices/activate body. challenge_json is the
+// verbatim JSON the server returned from /enroll
+// ({deviceId, credentialBlob, encryptedSecret}). NO network call, NO key.
+// Caller owns the buffer; free it with RootHeraldFreeEvidence.
+extern "C" ROOTHERALD_API RootHeraldResult RootHeraldEnrollActivate(
+    const char* challenge_json, char** out_activate_json)
+{
+    if (!challenge_json || !out_activate_json) return RH_PROTO_ERR_INVALID_PARAM;
+    *out_activate_json = nullptr;
+
+    std::string challenge(challenge_json);
+    auto deviceId  = RootHerald::JsonGet(challenge, "deviceId");
+    auto credBlob  = RootHerald::JsonGet(challenge, "credentialBlob");
+    auto encSecret = RootHerald::JsonGet(challenge, "encryptedSecret");
+    if (deviceId.empty() || credBlob.empty() || encSecret.empty()) {
+        RH_LOG_WARN("[enroll-activate] challenge missing deviceId/credentialBlob/encryptedSecret\n");
+        return RH_PROTO_ERR_INVALID_PARAM;
+    }
+
+    // Re-load the AK persisted by the collect half. SelectEnrolledProvider tries
+    // the cached method (PCP) first, then probes — so it finds the AK collect
+    // just persisted even across a fresh host invocation.
+    auto provider = SelectEnrolledProvider();
+    if (!provider) {
+        RH_LOG_WARN("[enroll-activate] no AK loaded — was enroll-collect run first?\n");
+        return RH_PROTO_ERR_NOT_ENROLLED;
+    }
+
+    // The mode-defining TPM op. For PCP this is NCRYPT_PCP_TPM12_IDACTIVATION,
+    // unprivileged. The decrypted secret is the only thing the activate body
+    // carries; the server constant-time compares it against the secret it sealed
+    // to the EK in MakeCredential and Name-match guards the bound AK.
+    auto secret = provider->ActivateCredential(Base64Decode(credBlob), Base64Decode(encSecret));
+    if (secret.empty()) {
+        RH_LOG_WARN("[enroll-activate] ActivateCredential failed\n");
+        return RH_PROTO_ERR_ATTESTATION_FAILED;
+    }
+    RH_LOG_WARN("[enroll-activate] ActivateCredential OK (%zu bytes)\n", secret.size());
+
+    // Exact POST /api/v1/devices/activate body. The genuine client sends NO
+    // akPublicKey here (only the decrypted secret) — the server verifies against
+    // the AK Name MakeCredential already bound at enroll. Mirrors RunEnrollFlow.
+    std::string json = RootHerald::JsonBuild({
+        {"deviceId",        deviceId},
+        {"decryptedSecret", Base64Encode(secret.data(), secret.size())}
+    });
+    char* buf = (char*)malloc(json.size() + 1);
+    if (!buf) return RH_PROTO_ERR_INTERNAL;
+    memcpy(buf, json.c_str(), json.size() + 1);
+    *out_activate_json = buf;
+    return RH_PROTO_OK;
 }
 
 void RootHeraldSetLinkToken(const char* link_token)
