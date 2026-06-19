@@ -31,6 +31,9 @@ extern "C" RootHeraldResult RootHeraldGetStatus(RootHeraldDeviceStatus* out_stat
 extern "C" RootHeraldResult RootHeraldCollectLocalPosture(RootHeraldPosture* out_posture);
 extern "C" RootHeraldResult RootHeraldCollectEvidence(const char* nonce_b64,
                                                       char** out_evidence_json);
+extern "C" RootHeraldResult RootHeraldEnrollCollect(char** out_enroll_json);
+extern "C" RootHeraldResult RootHeraldEnrollActivate(const char* challenge_json,
+                                                     char** out_activate_json);
 extern "C" void RootHeraldFreeEvidence(char* evidence_json);
 extern "C" void RootHeraldSetLinkToken(const char* link_token);
 extern "C" void RootHeraldSetDeviceId(const char* device_id);
@@ -39,7 +42,7 @@ extern "C" int RootHeraldRunElevatedEstablishKey(const char* server_url,
 
 namespace {
 
-constexpr const char* kAbiVersion = "1.3";
+constexpr const char* kAbiVersion = "1.4";
 constexpr const char* kLibraryVersion = "0.2.0";  // bumped when public ABI stabilises
 constexpr const char* kDefaultEndpoint = "https://rootherald.io";
 
@@ -451,6 +454,38 @@ extern "C" ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectEvidence(
 extern "C" ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json)
 {
     RootHeraldFreeEvidence(evidence_json);
+}
+
+extern "C" ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollCollect(
+    char** out_enroll_json)
+{
+    // Background-Check page-driven enrollment (contract C-enroll, ABI 1.4).
+    // HANDLE-LESS and KEYLESS by design — mirrors RootHeraldClient_CollectEvidence:
+    // no RootHeraldClient* is required because no api/site key is consulted and no
+    // RootHerald network call is made. The page relays the returned /enroll body to
+    // the CUSTOMER's server, which POSTs it to RootHerald and relays the
+    // MakeCredential challenge back to RootHeraldClient_EnrollActivate.
+    if (out_enroll_json == nullptr) return ROOTHERALD_ERR_INVALID_ARG;
+    *out_enroll_json = nullptr;
+
+    return MapRootHeraldStatus(RootHeraldEnrollCollect(out_enroll_json));
+}
+
+extern "C" ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollActivate(
+    const char* challenge_json, char** out_activate_json)
+{
+    // Second TPM-only half (contract C-enroll, ABI 1.4). Handle-less, keyless,
+    // network-free. challenge_json is the verbatim /enroll response the page
+    // relayed back ({deviceId, credentialBlob, encryptedSecret}); the returned
+    // /activate body ({deviceId, decryptedSecret}) is posted by the customer's
+    // server. The decrypted secret is the only credential material that crosses
+    // the boundary; the server constant-time compares it and Name-match guards
+    // the bound AK.
+    if (out_activate_json == nullptr) return ROOTHERALD_ERR_INVALID_ARG;
+    *out_activate_json = nullptr;
+    if (challenge_json == nullptr || challenge_json[0] == '\0') return ROOTHERALD_ERR_INVALID_ARG;
+
+    return MapRootHeraldStatus(RootHeraldEnrollActivate(challenge_json, out_activate_json));
 }
 
 extern "C" ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(

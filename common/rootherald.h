@@ -38,11 +38,24 @@
 #include <stddef.h>
 
 #define ROOTHERALD_ABI_VERSION_MAJOR 1
-#define ROOTHERALD_ABI_VERSION_MINOR 3
+#define ROOTHERALD_ABI_VERSION_MINOR 4
 
 /*
  * ABI changelog
  * -------------
+ * 1.4 — ADDED RootHeraldClient_EnrollCollect + RootHeraldClient_EnrollActivate
+ *       (Background-Check page-driven enrollment, contract C-enroll). Additive
+ *       only; every 1.3 symbol is unchanged. These are the TPM-only halves of
+ *       the two-round-trip enroll ceremony with the NETWORK boundary removed:
+ *       keyless and network-free, exactly like the 1.3 collect pair. The page
+ *       RELAYS the two server round-trips (POST /devices/enroll then
+ *       /devices/activate) through the CUSTOMER's server (WP4 Option A); the
+ *       client never POSTs to RootHerald on this path. EnrollCollect returns the
+ *       /enroll request body; the page posts it and hands the server's
+ *       MakeCredential challenge to EnrollActivate, which returns the /activate
+ *       request body. Both buffers are caller-owned and freed with the existing
+ *       RootHeraldClient_FreeEvidence (a generic char* free). The key-bearing
+ *       RootHeraldClient_Enroll stays for non-browser embedders that POST direct.
  * 1.3 — ADDED RootHeraldClient_CollectEvidence + RootHeraldClient_FreeEvidence
  *       (Background-Check "dumb client", contract C5). Additive only; every
  *       1.2 symbol is unchanged. Collect-only: NO API/site key required and NO
@@ -362,8 +375,84 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectEvidence(
 /**
  * Free an evidence buffer returned by RootHeraldClient_CollectEvidence. Safe to
  * call with NULL. Pairs with the caller-frees ownership of out_evidence_json.
+ * Also frees the enroll/activate buffers returned by the ABI 1.4 page-driven
+ * enrollment pair below — it is a generic char* deallocator.
  */
 ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json);
+
+/* ------------------------------------------------------------------ */
+/* Background-Check page-driven enrollment (contract C-enroll, ABI 1.4) */
+/* ------------------------------------------------------------------ */
+/*
+ * The enroll ceremony is irreducibly TWO server round-trips with a TPM op
+ * between: (1) collect EK pub + EK cert chain + create an AK -> POST
+ * /api/v1/devices/enroll -> the server validates the EK chain, enforces the AK
+ * template, and MakeCredential-seals a secret to the EK, returning a challenge
+ * blob; (2) TPM2_ActivateCredential(challenge) decrypts the secret -> POST
+ * /api/v1/devices/activate -> the server constant-time compares the secret and
+ * Name-match guards the bound AK -> enrolled.
+ *
+ * These two entry points are the TPM-only halves with the NETWORK boundary
+ * removed — keyless and network-free, exactly like RootHeraldClient_CollectEvidence.
+ * The page RELAYS the two round-trips through the CUSTOMER's server (which
+ * authenticates to RootHerald with its rh_sk_ secret key — WP4 Option A); the
+ * client makes NO RootHerald network call and consults NO API/site key, so a
+ * RootHeraldClient* handle is NOT required.
+ *
+ * SECURITY: this moves only the network boundary. The EK-chain validation, the
+ * AkTemplateValidator (closes the software-AK spoofing attack), MakeCredential
+ * sealing, the constant-time secret compare, and the activate Name-match guard
+ * ALL still run server-side on the relayed bytes — and the relay is byte-exact,
+ * so it weakens none of them.
+ *
+ * PLATFORM SUPPORT: functional on Windows (PCP backend — unprivileged credential
+ * activation, no UAC). Linux/macOS declare the symbols for ABI uniformity but
+ * return ROOTHERALD_ERR_INTERNAL until their collectors land, consistent with
+ * the other session entry points.
+ */
+
+/**
+ * Collect EK pub + EK cert chain + create (and persist) an AK; return the exact
+ * JSON body for POST /api/v1/devices/enroll. Makes NO network call and needs NO
+ * API/site key.
+ *
+ *   out_enroll_json : on ROOTHERALD_OK, receives a newly-allocated, NUL-
+ *                     terminated JSON string — the verbatim /enroll request body
+ *                     ({ekPublicKey, akPublicArea, platform, optional ekCertPem,
+ *                     optional ekCertificateChain}). The customer's server posts
+ *                     it to RootHerald and relays the MakeCredential challenge
+ *                     back to RootHeraldClient_EnrollActivate. Caller OWNS the
+ *                     buffer; free with RootHeraldClient_FreeEvidence. NULL on error.
+ *
+ * Returns ROOTHERALD_OK on success; ROOTHERALD_ERR_TPM_UNAVAILABLE /
+ * ROOTHERALD_ERR_SERVER on a TPM / AK-creation failure; ROOTHERALD_ERR_INVALID_ARG
+ * on a bad argument.
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollCollect(
+    char** out_enroll_json);
+
+/**
+ * TPM2_ActivateCredential over the server's MakeCredential challenge; return the
+ * exact JSON body for POST /api/v1/devices/activate. Makes NO network call and
+ * needs NO API/site key.
+ *
+ *   challenge_json    : the verbatim JSON the server returned from /enroll
+ *                       ({deviceId, credentialBlob, encryptedSecret}), relayed by
+ *                       the page. Required.
+ *   out_activate_json : on ROOTHERALD_OK, receives a newly-allocated, NUL-
+ *                       terminated JSON string — the verbatim /activate request
+ *                       body ({deviceId, decryptedSecret}). The genuine client
+ *                       sends NO akPublicKey here; the server verifies against the
+ *                       AK Name MakeCredential bound at enroll. Caller OWNS the
+ *                       buffer; free with RootHeraldClient_FreeEvidence. NULL on error.
+ *
+ * Returns ROOTHERALD_OK on success; ROOTHERALD_ERR_NOT_ENROLLED if no AK from a
+ * prior EnrollCollect is present; ROOTHERALD_ERR_SERVER if ActivateCredential
+ * fails; ROOTHERALD_ERR_INVALID_ARG on a bad/incomplete challenge.
+ */
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollActivate(
+    const char* challenge_json,
+    char** out_activate_json);
 
 /**
  * Elevated-child entry for the Windows TBS activation fallback (public
