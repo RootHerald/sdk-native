@@ -8,6 +8,20 @@ service or daemon to install on the customer's machine.
 Public surface: **one header**, `common/rootherald.h`. C99-compatible,
 consumable from C, C++, Rust, Go, Swift, .NET P/Invoke, etc.
 
+> **Platform status up front.** `RootHeraldClient_Verify` (and the rest of the
+> attestation surface) is **functional on Windows only** today (developer-
+> dogfooded against a real TPM; not yet externally validated). On **Linux** and
+> **macOS** the non-mock path is **not yet implemented** — it returns
+> `ROOTHERALD_ERR_INTERNAL` ("not yet implemented") rather than a verdict. Mock
+> mode (`RootHeraldClient_SetMockTpm`) returns a canned `ALLOW` for **CI only**
+> and is never a real verdict.
+>
+> **This is a client library: it collects evidence, it never verifies.** Token
+> /verdict verification and the `rh_sk_` secret key belong to a *separate*
+> component — your backend, using a server SDK (`@rootherald/node`, `sdk-go`,
+> `sdk-dotnet`, `sdk-java`, `sdk-php`, `sdk-ruby` at
+> https://github.com/RootHerald). Never put the `rh_sk_` secret on the device.
+
 The library is **silent by default** — no writes to stdout/stderr unless
 you register a log callback. This matches the convention set by libfido2,
 libsodium, libcurl, and mbedTLS: an embedded library should not impose
@@ -137,36 +151,55 @@ validation are unknowable locally — so never render posture output as
 "you will pass". Implemented on **Windows** today; the Linux/macOS stubs
 return `ROOTHERALD_ERR_INTERNAL` like the rest of the session surface.
 
-## Hosting requirement: `--establish-key` (Windows)
+## Windows elevation (your choice, not ours)
 
-Windows TBS only permits raw TPM 2.0 credential activation
-(`TPM2_ActivateCredential`) for an **elevated** caller. When the
-unprivileged NCrypt/PCP path is rejected by the firmware, the SDK falls
-back to spawning *your executable* elevated (one UAC prompt) with:
+First-time **enrollment** runs `TPM2_ActivateCredential`, which Windows permits
+only for an **elevated** process. Attestation afterwards is unprivileged forever.
 
+**The SDK never elevates on your behalf.** Elevation is a policy decision — how
+(and whether) to acquire admin rights depends on your app, so the SDK *reports*
+the need and lets you choose:
+
+- `RootHeraldClient_Enroll` (and the auto-enroll inside `_AttestSession` /
+  `_Verify`) returns **`ROOTHERALD_ERR_ELEVATION_REQUIRED`** when the process
+  is not elevated.
+- A process that is **already elevated** (e.g. a Windows service) never sees
+  that code — enrollment runs in-process, no prompt.
+
+### The worker hook (needed by every elevated strategy)
+
+Whatever gets you to an elevated context performs the actual enrollment by
+calling the SDK worker:
+
+```c
+RootHerald_RunElevatedEstablishKey(server_url, result_path); /* run ELEVATED */
 ```
-your_app.exe --establish-key <server_url> <result_path>
-```
 
-Any process that calls `RootHeraldClient_Enroll`,
-`RootHeraldClient_AttestSession`, or `RootHeraldClient_Verify` MUST route
-that argv pair to the SDK **before any normal startup work**:
+It runs the raw-TBS enroll, writes the device id to `result_path`, and exits 0.
+The common way to reach it is to re-launch your own exe with an argv hook routed
+**before any normal startup**:
 
 ```c
 int main(int argc, char** argv) {
-    if (argc >= 4 && strcmp(argv[1], "--establish-key") == 0) {
+    if (argc >= 4 && strcmp(argv[1], "--establish-key") == 0)
         return RootHerald_RunElevatedEstablishKey(argv[2], argv[3]);
-    }
     /* ... normal startup ... */
 }
 ```
 
-The elevated child performs the raw-TBS enrollment, writes the resulting
-device id to `<result_path>`, and exits; the parent picks the result up and
-continues unprivileged. If the host does not route this argument the
-TBS fallback cannot complete and enrollment fails on firmware that rejects
-unprivileged PCP activation. `samples/minimal/windows/main.cpp` shows the
-exact pattern.
+### Pick a strategy
+
+| Strategy | When | How |
+|---|---|---|
+| **Self-elevation shim** | Normal desktop apps | On `ELEVATION_REQUIRED`, re-spawn your own exe elevated (`ShellExecuteEx` verb `runas`) with `--establish-key <url> <path>`; the argv hook routes it. One UAC. **`samples/minimal/windows/main.cpp` shows this end to end.** |
+| **Use the RootHerald host** | Browser / native-messaging integrations | Ship our `rootherald_host.exe` (it already implements the shim). Your app does nothing native. |
+| **Privileged helper / service** | Apps that already run elevated, or can install a tiny signed helper | Call `RootHerald_RunElevatedEstablishKey` directly from the elevated context; the unprivileged side then sees the device as enrolled. |
+| **Check-then-skip (degrade)** | Sandboxed / Store / locked-down apps that cannot elevate | Detect `ELEVATION_REQUIRED`, skip enrollment, and degrade gracefully (no attestation) rather than prompting. |
+
+Caller-supplied `server_url` must be the **same** RootHerald endpoint your
+unprivileged client uses, or the two halves target different servers. See the
+developer portal's "Windows elevation patterns" page for copy-paste samples of
+each strategy.
 
 ## Platform-specific notes
 

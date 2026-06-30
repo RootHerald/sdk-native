@@ -33,7 +33,7 @@ struct RootHeraldClient {
     pthread_mutex_t lock;
 };
 
-static const char* const kAbiVersion = "1.4";
+static const char* const kAbiVersion = "2.0";
 static const char* const kLibraryVersion = "0.2.0";
 static const char* const kDefaultEndpoint = "https://rootherald.io";
 
@@ -217,33 +217,6 @@ ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json)
     /* Caller-frees ownership; matches the Windows implementation. free(NULL) is
      * a no-op. */
     free(evidence_json);
-}
-
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollCollect(
-    char** out_enroll_json)
-{
-    /* Background-Check page-driven enrollment (contract C-enroll, ABI 1.4).
-     * Keyless, handle-less, no network call by contract.
-     *
-     * TODO(macos): macOS is "reduced" assurance — Secure Enclave, no TPM. When
-     * the SE enrollment collector lands (rootherald_macos.m), factor its key-
-     * creation portion out to return the /enroll request body WITHOUT a network
-     * call, mirroring the Windows RootHeraldEnrollCollect. Until then return the
-     * same not-implemented signal the other macOS session entry points use. */
-    if (out_enroll_json) *out_enroll_json = NULL;
-    if (!out_enroll_json) return ROOTHERALD_ERR_INVALID_ARG;
-    return ROOTHERALD_ERR_INTERNAL; /* not implemented on macOS yet */
-}
-
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollActivate(
-    const char* challenge_json, char** out_activate_json)
-{
-    /* Second half (contract C-enroll, ABI 1.4). Keyless, handle-less, no network
-     * call. TODO(macos): the SE counterpart of credential activation. */
-    if (out_activate_json) *out_activate_json = NULL;
-    if (!challenge_json || !challenge_json[0] || !out_activate_json)
-        return ROOTHERALD_ERR_INVALID_ARG;
-    return ROOTHERALD_ERR_INTERNAL; /* not implemented on macOS yet */
 }
 
 ROOTHERALD_API const char* RootHerald_AbiVersionString(void)  { return kAbiVersion; }

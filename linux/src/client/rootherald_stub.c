@@ -187,46 +187,6 @@ ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json)
     free(evidence_json);
 }
 
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollCollect(
-    char** out_enroll_json)
-{
-    /* Page-driven enrollment (contract C-enroll, ABI 1.4). Canned mock enroll
-     * body — same stub convention as the other entry points: never touches
-     * hardware or the network. Caller frees via RootHeraldClient_FreeEvidence.
-     * NEVER ship the stub in production. */
-    if (!out_enroll_json) return ROOTHERALD_ERR_INVALID_ARG;
-    *out_enroll_json = NULL;
-
-    const char* body = "{\"stub\":true,\"ekPublicKey\":\"c3R1Yg==\","
-                       "\"akPublicArea\":\"c3R1Yg==\",\"platform\":\"linux\"}";
-    size_t n = strlen(body) + 1;
-    char* buf = (char*)malloc(n);
-    if (!buf) return ROOTHERALD_ERR_INTERNAL;
-    memcpy(buf, body, n);
-    *out_enroll_json = buf;
-    return ROOTHERALD_OK;
-}
-
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollActivate(
-    const char* challenge_json, char** out_activate_json)
-{
-    /* Second half (contract C-enroll, ABI 1.4). Canned mock activate body that
-     * echoes nothing real — stub only. */
-    if (!out_activate_json) return ROOTHERALD_ERR_INVALID_ARG;
-    *out_activate_json = NULL;
-    if (!challenge_json || !challenge_json[0]) return ROOTHERALD_ERR_INVALID_ARG;
-
-    const char* body = "{\"stub\":true,\"deviceId\":"
-                       "\"00000000-0000-4000-8000-000000000stub\","
-                       "\"decryptedSecret\":\"c3R1Yg==\"}";
-    size_t n = strlen(body) + 1;
-    char* buf = (char*)malloc(n);
-    if (!buf) return ROOTHERALD_ERR_INTERNAL;
-    memcpy(buf, body, n);
-    *out_activate_json = buf;
-    return ROOTHERALD_OK;
-}
-
 ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(
     const char* server_url, const char* result_path)
 {

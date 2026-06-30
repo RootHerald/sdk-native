@@ -31,7 +31,7 @@ struct RootHeraldClient {
     pthread_mutex_t lock;
 };
 
-static const char* const kAbiVersion = "1.4";
+static const char* const kAbiVersion = "2.0";
 static const char* const kLibraryVersion = "0.2.0";
 static const char* const kDefaultEndpoint = "https://rootherald.io";
 
@@ -229,35 +229,6 @@ ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json)
     /* Caller-frees ownership; matches the Windows implementation so the same
      * embedder code is portable. free(NULL) is a no-op. */
     free(evidence_json);
-}
-
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollCollect(
-    char** out_enroll_json)
-{
-    /* Background-Check page-driven enrollment (contract C-enroll, ABI 1.4).
-     * Keyless, handle-less, no network call by contract.
-     *
-     * TODO(linux): factor the EK gather + AK create out of the Linux
-     * RootHeraldEnroll path (rootherald_linux.c) so it returns the /enroll
-     * request body WITHOUT the POST — exactly as the Windows
-     * RootHeraldEnrollCollect does. Until then return the same not-implemented
-     * signal the other Linux session entry points use, so the ABI is uniform
-     * across platforms but never fabricates an enrollment. */
-    if (out_enroll_json) *out_enroll_json = NULL;
-    if (!out_enroll_json) return ROOTHERALD_ERR_INVALID_ARG;
-    return ROOTHERALD_ERR_INTERNAL; /* not implemented on Linux yet */
-}
-
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollActivate(
-    const char* challenge_json, char** out_activate_json)
-{
-    /* Second TPM-only half (contract C-enroll, ABI 1.4). Keyless, handle-less,
-     * no network call. TODO(linux): TPM2_ActivateCredential over the relayed
-     * challenge, returning the /activate request body. */
-    if (out_activate_json) *out_activate_json = NULL;
-    if (!challenge_json || !challenge_json[0] || !out_activate_json)
-        return ROOTHERALD_ERR_INVALID_ARG;
-    return ROOTHERALD_ERR_INTERNAL; /* not implemented on Linux yet */
 }
 
 ROOTHERALD_API const char* RootHerald_AbiVersionString(void)

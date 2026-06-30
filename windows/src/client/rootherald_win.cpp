@@ -1,18 +1,19 @@
 /**
  *  Root Herald Windows Client SDK -- Full Implementation
  *
- * The attestation key (AK) lifecycle and credential activation are handled
- * through a swappable strategy, IAttestationKeyProvider, with two backends:
+ * Enrollment establishes the device's attestation key (AK) exactly once, under
+ * a single elevation (the "Establish hardware key" UAC): raw TPM 2.0 over TBS
+ * creates the AK (RSASSA-SHA256 template), runs TPM2_ActivateCredential to bind
+ * it to the EK, and evicts it to a PERSISTENT handle. Every subsequent
+ * attestation (TPM2_Quote + PCR/event-log collection) runs UNPRIVILEGED against
+ * that persistent handle — no further UAC, ever.
  *
- *   - PcpKeyProvider (NCrypt PCP): fully unprivileged. Tried first.
- *   - TbsKeyProvider (raw TPM 2.0 over TBS): credential activation needs an
- *     elevated process, so it runs in a one-shot elevated child. Used as the
- *     fallback when PCP activation is rejected by the firmware.
- *
- * The enroll / attest / rotate flows are written once against the interface;
- * the winning backend is probed on first enroll and cached per machine. EK
- * public-key / cert / intermediate gathering and TPM2_Quote are shared,
- * mode-agnostic steps.
+ * There is one AK backend (TbsKeyProvider). The earlier dual-path design
+ * (PCP-first, elevated-TBS fallback) was removed once it was proven that raw-TBS
+ * activation succeeds under elevation: PCP's only value was dodging the UAC, but
+ * its AIK is locked to a SHA-1 signing scheme and its quote handle is bound to
+ * PCP's TBS context. TpmPcp is retained solely for the unprivileged EK
+ * public-key / cert read. EK gathering and TPM2_Quote are mode-agnostic.
  *
  * Uses WinHTTP for server communication.
  */
@@ -22,7 +23,6 @@
 #include "tpm_pcp.h"
 #include "tpm_commands.h"
 #include "attestation_key_provider.h"
-#include "pcp_key_provider.h"
 #include "tbs_key_provider.h"
 #include "amd_aia_fetch.h"
 #include "event_log.h"
@@ -47,20 +47,12 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 
-// --- Backend identities ---------------------------------------------------
-
-// PCP-managed AK key name. PCP owns persistence by name.
-static const wchar_t* kPcpAkName = L"RootHeraldAK";
+// --- Backend identity -----------------------------------------------------
 
 // Persistent NV slot for the TBS-managed AK (owner persistent range). Survives
 // reboots and is reachable from any TBS context for Quote. Chosen away from
 // the canonical 0x81010001 to avoid colliding with vendor tooling.
 static const uint32_t kTbsAkPersistentHandle = 0x81029301u;
-
-// Per-machine cache of which backend won (HKCU). Stable across runs; lets us
-// skip the PCP probe on rotation / re-establish once a method is known.
-static const wchar_t* kCacheSubkey = L"Software\\RootHerald";
-static const wchar_t* kCacheValue  = L"ActivationMethod"; // "pcp" | "tbs"
 
 // Global link token / device ID, set by the tray app before RootHeraldAttest.
 static std::string g_linkToken;
@@ -221,37 +213,8 @@ static std::string ComputeDeviceIdFromFingerprint(const std::vector<uint8_t>& fi
 }
 
 // ===========================================================================
-// Activation-method cache + process elevation.
+// Process elevation.
 // ===========================================================================
-
-enum class ActivationMethod { Unknown, Pcp, Tbs };
-
-static ActivationMethod ReadCachedMethod()
-{
-    wchar_t buf[16] = {0};
-    DWORD cb = sizeof(buf);
-    DWORD type = 0;
-    LONG r = RegGetValueW(HKEY_CURRENT_USER, kCacheSubkey, kCacheValue,
-                          RRF_RT_REG_SZ, &type, buf, &cb);
-    if (r != ERROR_SUCCESS) return ActivationMethod::Unknown;
-    if (wcscmp(buf, L"pcp") == 0) return ActivationMethod::Pcp;
-    if (wcscmp(buf, L"tbs") == 0) return ActivationMethod::Tbs;
-    return ActivationMethod::Unknown;
-}
-
-static void WriteCachedMethod(ActivationMethod m)
-{
-    const wchar_t* v = (m == ActivationMethod::Pcp) ? L"pcp"
-                     : (m == ActivationMethod::Tbs) ? L"tbs" : nullptr;
-    if (!v) return;
-    HKEY hKey = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, kCacheSubkey, 0, nullptr, 0,
-                        KEY_SET_VALUE, nullptr, &hKey, nullptr) == ERROR_SUCCESS) {
-        RegSetValueExW(hKey, kCacheValue, 0, REG_SZ,
-                       (const BYTE*)v, (DWORD)((wcslen(v) + 1) * sizeof(wchar_t)));
-        RegCloseKey(hKey);
-    }
-}
 
 static bool IsProcessElevated()
 {
@@ -390,10 +353,9 @@ static bool GatherEkEnrollData(EkEnrollData& out)
 }
 
 // Assemble the exact field map for POST /api/v1/devices/enroll from the gathered
-// EK data and the AK public area. Single source of truth so the direct-POST path
-// (RunEnrollFlow) and the page-driven keyless split (RootHeraldEnrollCollect)
-// emit byte-identical enroll request bodies — the server's EK validation +
-// AkTemplateValidator + MakeCredential run on these exact bytes either way.
+// EK data and the AK public area. Used by the (elevated) RunEnrollFlow — the
+// server's EK validation + AkTemplateValidator + MakeCredential run on these
+// exact bytes.
 // The ekCertificateChain value is a raw JSON array string (JsonBuild embeds it
 // verbatim via its '[' detection); every other value is a plain string.
 static std::map<std::string, std::string> BuildEnrollFields(
@@ -432,11 +394,11 @@ static EnrollOutcome RunEnrollFlow(const char* server_url,
                                    RootHerald::IAttestationKeyProvider& provider,
                                    std::string& outDeviceId)
 {
-    // If this backend needs an elevated process to activate the credential
-    // (raw TBS) and we are not elevated, stop before the server round-trip so
-    // we never strand a half-enrolled device. ActivateFailed signals the caller
-    // to retry under elevation.
-    if (provider.RequiresElevationForActivate() && !IsProcessElevated()) {
+    // Raw-TBS TPM2_ActivateCredential requires an elevated process. Guard before
+    // the server round-trip so we never strand a half-enrolled device; the caller
+    // reaches RunEnrollFlow only after arranging elevation (in-process or via the
+    // elevated --establish-key child).
+    if (!IsProcessElevated()) {
         RH_LOG_WARN("[enroll:%s] activation needs elevation; process is not elevated\n",
                 provider.ModeName());
         return EnrollOutcome::ActivateFailed;
@@ -461,8 +423,7 @@ static EnrollOutcome RunEnrollFlow(const char* server_url,
     }
     RH_LOG_WARN("[enroll:%s] AK created, pub area %zu bytes\n", provider.ModeName(), akPub.size());
 
-    // POST /enroll. Built via the shared assembler so the direct-POST path and
-    // the page-driven keyless split (RootHeraldEnrollCollect) post identical bytes.
+    // POST /enroll. Built via the shared assembler.
     std::map<std::string, std::string> fields = BuildEnrollFields(ek, akPub);
     std::string url = std::string(server_url) + "/api/v1/devices/enroll";
     auto resp = RootHerald::HttpPost(url, RootHerald::JsonBuild(fields));
@@ -543,7 +504,6 @@ extern "C" ROOTHERALD_API int RootHeraldRunElevatedEstablishKey(
         RH_LOG_WARN("[establish-key] TBS enrollment failed (outcome=%d)\n", (int)outcome);
         return 1;
     }
-    WriteCachedMethod(ActivationMethod::Tbs);
     if (result_path && *result_path) {
         FILE* f = nullptr;
         if (fopen_s(&f, result_path, "wb") == 0 && f) {
@@ -554,84 +514,26 @@ extern "C" ROOTHERALD_API int RootHeraldRunElevatedEstablishKey(
     return 0;
 }
 
-// Spawn the current executable elevated to run RootHeraldRunElevatedEstablishKey.
-// Surfaces a UAC prompt (the "Establish hardware key" moment). Returns true and
-// fills outDeviceId on success.
-static bool SpawnElevatedEstablishKey(const char* server_url, std::string& outDeviceId)
-{
-    wchar_t exePath[MAX_PATH] = {0};
-    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0) return false;
-
-    wchar_t tempDir[MAX_PATH] = {0};
-    GetTempPathW(MAX_PATH, tempDir);
-    wchar_t resultPathW[MAX_PATH] = {0};
-    swprintf_s(resultPathW, L"%srh_establish_%lu.txt", tempDir, GetCurrentProcessId());
-    DeleteFileW(resultPathW);
-
-    // narrow result path for the child arg
-    char resultPathA[MAX_PATH] = {0};
-    WideCharToMultiByte(CP_UTF8, 0, resultPathW, -1, resultPathA, sizeof(resultPathA), nullptr, nullptr);
-
-    int wUrl = MultiByteToWideChar(CP_UTF8, 0, server_url, -1, nullptr, 0);
-    std::wstring urlW(wUrl > 0 ? wUrl - 1 : 0, L'\0');
-    if (wUrl > 0) MultiByteToWideChar(CP_UTF8, 0, server_url, -1, urlW.data(), wUrl);
-
-    std::wstring args = L"--establish-key \"" + urlW + L"\" \"" + resultPathW + L"\"";
-
-    SHELLEXECUTEINFOW sei = { sizeof(sei) };
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-    sei.lpVerb = L"runas";          // triggers UAC
-    sei.lpFile = exePath;
-    sei.lpParameters = args.c_str();
-    sei.nShow = SW_HIDE;
-    if (!ShellExecuteExW(&sei) || !sei.hProcess) {
-        RH_LOG_WARN("[establish-key] elevation launch failed/declined (err=%lu)\n", GetLastError());
-        return false;
-    }
-    WaitForSingleObject(sei.hProcess, INFINITE);
-    DWORD exitCode = 1;
-    GetExitCodeProcess(sei.hProcess, &exitCode);
-    CloseHandle(sei.hProcess);
-    if (exitCode != 0) {
-        RH_LOG_WARN("[establish-key] elevated child failed (exit=%lu)\n", exitCode);
-        return false;
-    }
-
-    // Read the deviceId the child wrote.
-    FILE* f = nullptr;
-    if (fopen_s(&f, resultPathA, "rb") == 0 && f) {
-        char buf[256] = {0};
-        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-        fclose(f);
-        DeleteFileW(resultPathW);
-        outDeviceId.assign(buf, n);
-    }
-    return !outDeviceId.empty();
-}
-
 // ===========================================================================
-// Public API: enroll (PCP-first, elevated-TBS fallback), attest, status.
+// Public API: enroll (elevated-TBS; elevation is the CALLER's responsibility),
+// attest, status.
+//
+// The SDK deliberately does NOT acquire elevation itself (no ShellExecute/runas,
+// no service install). Enrollment's TPM2_ActivateCredential requires an elevated
+// process; when the caller is unprivileged, RootHeraldEnroll reports
+// RH_PROTO_ERR_ELEVATION_REQUIRED and the caller chooses an elevation strategy
+// (its own escalation shim, our host binary, an existing privileged service, or
+// simply skipping enrollment). Once elevated, the caller drives enrollment via
+// RootHeraldRunElevatedEstablishKey (or by calling this while already elevated).
 // ===========================================================================
 
-static bool AnyAkPresent(ActivationMethod cached)
+// True if the device already has a persisted AK. The persistent-handle AK
+// survives reboots, uninstalls, and test hard-scrubs (it's a TPM NV object), so
+// this is the sole source of truth for "already enrolled".
+static bool AnyAkPresent()
 {
-    // Probe the cached backend first, but ALWAYS fall through to probing both
-    // when the cache is unknown/miss — the persistent AK can outlive a wiped
-    // HKCU cache (uninstall, test hardScrub), and we must still recognise the
-    // device as enrolled rather than triggering a needless re-enroll.
-    if (cached == ActivationMethod::Pcp) {
-        RootHerald::PcpKeyProvider pcp(kPcpAkName);
-        if (pcp.Open() && pcp.AkExists()) return true;
-    }
-    {
-        RootHerald::TbsKeyProvider tbs(kTbsAkPersistentHandle);
-        if (tbs.Open() && tbs.AkExists()) return true;
-    }
-    {
-        RootHerald::PcpKeyProvider pcp(kPcpAkName);
-        if (pcp.Open() && pcp.AkExists()) return true;
-    }
-    return false;
+    RootHerald::TbsKeyProvider tbs(kTbsAkPersistentHandle);
+    return tbs.Open() && tbs.AkExists();
 }
 
 RootHeraldResult RootHeraldEnroll(
@@ -643,81 +545,36 @@ RootHeraldResult RootHeraldEnroll(
         return RH_PROTO_ERR_INVALID_PARAM;
     memset(out_info, 0, sizeof(RootHeraldEnrollmentInfo));
 
-    ActivationMethod cached = ReadCachedMethod();
-
     // Already enrolled (and not rotating): bail.
-    if (!force_reenroll && AnyAkPresent(cached)) {
-        RH_LOG_WARN("[enroll] already enrolled via %s; use force_reenroll=1 to rotate\n",
-                cached == ActivationMethod::Tbs ? "tbs" : "pcp");
+    if (!force_reenroll && AnyAkPresent()) {
+        RH_LOG_WARN("[enroll] already enrolled; use force_reenroll=1 to rotate\n");
         return RH_PROTO_ERR_ALREADY_ENROLLED;
     }
 
+    // Raw-TBS enrollment requires an elevated process (TPM2_ActivateCredential).
+    // If we're not elevated, REPORT that and let the caller decide how to
+    // elevate — the SDK never spawns a UAC on its own. An already-elevated caller
+    // (admin shell, the caller's escalation shim, or a privileged service that
+    // routed here via RootHeraldRunElevatedEstablishKey) runs in-process; the AK
+    // is evicted to a persistent handle so every later attestation is unprivileged.
+    if (!IsProcessElevated())
+        return RH_PROTO_ERR_ELEVATION_REQUIRED;
+
     std::string deviceId;
-
-    // PCP-first is ONLY worthwhile when we are unprivileged: its entire value
-    // is letting an ordinary user enroll without a UAC prompt. If we are
-    // already elevated (admin shell or the elevated child), there is no UAC to
-    // avoid, and TBS is the better backend anyway — its persistent handle
-    // gives a Quote handle valid in the unprivileged attestation process,
-    // whereas a PCP key's platform handle is bound to PCP's TBS context.
-    if (!IsProcessElevated() && cached != ActivationMethod::Tbs) {
-        RootHerald::PcpKeyProvider pcp(kPcpAkName);
-        auto outcome = RunEnrollFlow(server_url, pcp, deviceId);
-        if (outcome == EnrollOutcome::Ok) {
-            WriteCachedMethod(ActivationMethod::Pcp);
-            strncpy_s(out_info->device_id, deviceId.c_str(), _TRUNCATE);
-            return RH_PROTO_OK;
-        }
-        if (outcome == EnrollOutcome::EnrollFailed) {
-            return RH_PROTO_ERR_ENROLLMENT_FAILED; // server/network — don't elevate
-        }
-        // ActivateFailed: PCP needs elevation on this firmware. Clean up the
-        // orphaned PCP key and fall through to the elevated TBS path.
-        RH_LOG_WARN("[enroll] PCP activation needs elevation; falling back to elevated TBS\n");
-        pcp.DeleteAk();
-    }
-
-    // TBS path. Already elevated -> run in-process; otherwise spawn the
-    // elevated child (the "Establish hardware key" UAC).
-    if (IsProcessElevated()) {
-        RootHerald::TbsKeyProvider tbs(kTbsAkPersistentHandle);
-        auto outcome = RunEnrollFlow(server_url, tbs, deviceId);
-        if (outcome != EnrollOutcome::Ok) return RH_PROTO_ERR_ENROLLMENT_FAILED;
-        WriteCachedMethod(ActivationMethod::Tbs);
-    } else {
-        if (!SpawnElevatedEstablishKey(server_url, deviceId))
-            return RH_PROTO_ERR_ENROLLMENT_FAILED;
-        WriteCachedMethod(ActivationMethod::Tbs); // parent's HKCU is authoritative
-    }
+    RootHerald::TbsKeyProvider tbs(kTbsAkPersistentHandle);
+    if (RunEnrollFlow(server_url, tbs, deviceId) != EnrollOutcome::Ok)
+        return RH_PROTO_ERR_ENROLLMENT_FAILED;
     strncpy_s(out_info->device_id, deviceId.c_str(), _TRUNCATE);
     return RH_PROTO_OK;
 }
 
-// Return an opened provider whose AK is loaded, or null if no backend has an
-// AK (i.e. not enrolled). Tries the cached method first, then probes both
-// backends so a scrubbed cache (HKCU wiped by an uninstall/test) still finds a
-// persisted AK without forcing a re-enroll. Re-caches the discovered method.
+// Return an opened provider whose AK is loaded, or null if not enrolled. The AK
+// lives at a persistent handle (valid across TBS contexts and in an unprivileged
+// process), so a single load suffices — no backend probing, no cache.
 static std::unique_ptr<RootHerald::IAttestationKeyProvider> SelectEnrolledProvider()
 {
-    ActivationMethod cached = ReadCachedMethod();
-
-    auto tryTbs = []() -> std::unique_ptr<RootHerald::IAttestationKeyProvider> {
-        auto p = std::make_unique<RootHerald::TbsKeyProvider>(kTbsAkPersistentHandle);
-        if (p->Open() && p->LoadAk()) return p;
-        return nullptr;
-    };
-    auto tryPcp = []() -> std::unique_ptr<RootHerald::IAttestationKeyProvider> {
-        auto p = std::make_unique<RootHerald::PcpKeyProvider>(kPcpAkName);
-        if (p->Open() && p->LoadAk()) return p;
-        return nullptr;
-    };
-
-    if (cached == ActivationMethod::Tbs) { if (auto p = tryTbs()) return p; }
-    if (cached == ActivationMethod::Pcp) { if (auto p = tryPcp()) return p; }
-    // Cache miss / mismatch: probe both (TBS first — its persistent handle is
-    // valid across contexts). Re-cache whatever we find.
-    if (auto p = tryTbs()) { WriteCachedMethod(ActivationMethod::Tbs); return p; }
-    if (auto p = tryPcp()) { WriteCachedMethod(ActivationMethod::Pcp); return p; }
+    auto p = std::make_unique<RootHerald::TbsKeyProvider>(kTbsAkPersistentHandle);
+    if (p->Open() && p->LoadAk()) return p;
     return nullptr;
 }
 
@@ -1002,153 +859,15 @@ extern "C" ROOTHERALD_API void RootHeraldFreeEvidence(char* evidence_json)
 }
 
 // ===========================================================================
-// Page-driven enrollment split (Background-Check WP4 / Phase 4a, contract
-// C-enroll, ABI 1.4).
+// (Removed) Page-driven enrollment split.
 //
-// The enroll ceremony is irreducibly two server round-trips with a TPM op
-// between them:
-//   1. collect EK pub + EK cert chain + create an AK  -> POST /devices/enroll
-//      -> server validates EK + AkTemplate + MakeCredential-seals a secret to
-//         the EK and returns a challenge blob.
-//   2. TPM2_ActivateCredential(challenge) decrypts the secret
-//      -> POST /devices/activate -> server constant-time compares + Name-match
-//         guards -> enrolled.
-//
-// WP7 removed the native host's auto-enroll and the host no longer POSTs to
-// RootHerald. Per WP4 Option A the two round-trips are RELAYED by the page
-// through the CUSTOMER's server (authenticated with its rh_sk_ secret key). So
-// these two entry points do the TPM-only halves and make NO network call and
-// need NO API/site key — mirroring RootHeraldCollectEvidence. The page hands
-// the returned enroll body to its server, gets back the challenge, and hands
-// the challenge to the activate half.
-//
-// SECURITY: this only moves the NETWORK boundary. The EK-chain validation,
-// AkTemplateValidator (closes the software-AK spoof), MakeCredential sealing,
-// the constant-time secret compare, and the activate Name-match guard ALL run
-// server-side on the genuine client bytes exactly as before. The split relays
-// those bytes byte-for-byte; it weakens nothing.
-//
-// Cross-call AK continuity: the AK created in collect must be the same AK that
-// activate runs ActivateCredential against. The two halves may execute in
-// separate host invocations, so collect PERSISTS the freshly-created AK before
-// returning (PersistAk) and activate re-loads it (SelectEnrolledProvider). A
-// persisted-but-unactivated AK is inert — the server never trusts it until the
-// activate round-trip completes the MakeCredential proof.
-//
-// PCP-only by design: the browser/native-messaging path is unprivileged, and
-// the whole point of PCP is unprivileged credential activation (no UAC). The
-// raw-TBS backend needs an elevated process for ActivateCredential
-// (TPM_E_COMMAND_BLOCKED otherwise), which cannot be driven cleanly across two
-// page-relayed calls — that elevated path stays exclusively on the direct
-// RootHeraldEnroll entry for non-browser embedders.
+// RootHeraldEnrollCollect / RootHeraldEnrollActivate were the PCP-only,
+// unprivileged two-round-trip enroll relayed through the customer's server.
+// They are gone: enrollment now always runs under a single elevation via
+// RootHeraldEnroll (the elevated-TBS path), so the browser/host triggers that
+// one-shot elevated enroll rather than relaying TPM halves. Per-request
+// attestation (RootHeraldCollectEvidence) stays unprivileged and relay-friendly.
 // ===========================================================================
-
-// Collect EK pub + EK cert chain + create (and persist) an AK; return the exact
-// POST /api/v1/devices/enroll body. NO network call, NO key. Caller owns the
-// buffer; free it with RootHeraldFreeEvidence.
-extern "C" ROOTHERALD_API RootHeraldResult RootHeraldEnrollCollect(
-    char** out_enroll_json)
-{
-    if (!out_enroll_json) return RH_PROTO_ERR_INVALID_PARAM;
-    *out_enroll_json = nullptr;
-
-    EkEnrollData ek;
-    if (!GatherEkEnrollData(ek)) {
-        RH_LOG_WARN("[enroll-collect] EK gather failed\n");
-        return RH_PROTO_ERR_ENROLLMENT_FAILED;
-    }
-
-    // PCP backend only — unprivileged, no UAC. (TBS activation needs elevation
-    // and is not reachable on the page-relayed path; see header note above.)
-    RootHerald::PcpKeyProvider pcp(kPcpAkName);
-    if (!pcp.Open()) {
-        RH_LOG_WARN("[enroll-collect] PCP open failed\n");
-        return RH_PROTO_ERR_ENROLLMENT_FAILED;
-    }
-    if (!pcp.CreateAk()) {
-        RH_LOG_WARN("[enroll-collect] CreateAk failed\n");
-        return RH_PROTO_ERR_ENROLLMENT_FAILED;
-    }
-    auto akPub = pcp.GetAkPublicArea();
-    if (akPub.empty()) {
-        RH_LOG_WARN("[enroll-collect] GetAkPublicArea failed\n");
-        pcp.DeleteAk();
-        return RH_PROTO_ERR_ENROLLMENT_FAILED;
-    }
-
-    // Persist now so the activate half (a possibly-separate invocation) can
-    // re-load the very same AK whose Name the server is about to bind via
-    // MakeCredential. Inert until activate proves the credential.
-    if (!pcp.PersistAk()) {
-        RH_LOG_WARN("[enroll-collect] PersistAk failed\n");
-        pcp.DeleteAk();
-        return RH_PROTO_ERR_ENROLLMENT_FAILED;
-    }
-    WriteCachedMethod(ActivationMethod::Pcp);
-    RH_LOG_WARN("[enroll-collect] AK created+persisted (PCP), pub area %zu bytes\n", akPub.size());
-
-    // Byte-identical to the direct path's enroll body.
-    std::string json = RootHerald::JsonBuild(BuildEnrollFields(ek, akPub));
-    char* buf = (char*)malloc(json.size() + 1);
-    if (!buf) return RH_PROTO_ERR_INTERNAL;
-    memcpy(buf, json.c_str(), json.size() + 1);
-    *out_enroll_json = buf;
-    return RH_PROTO_OK;
-}
-
-// TPM2_ActivateCredential over the server's MakeCredential challenge blob;
-// return the exact POST /api/v1/devices/activate body. challenge_json is the
-// verbatim JSON the server returned from /enroll
-// ({deviceId, credentialBlob, encryptedSecret}). NO network call, NO key.
-// Caller owns the buffer; free it with RootHeraldFreeEvidence.
-extern "C" ROOTHERALD_API RootHeraldResult RootHeraldEnrollActivate(
-    const char* challenge_json, char** out_activate_json)
-{
-    if (!challenge_json || !out_activate_json) return RH_PROTO_ERR_INVALID_PARAM;
-    *out_activate_json = nullptr;
-
-    std::string challenge(challenge_json);
-    auto deviceId  = RootHerald::JsonGet(challenge, "deviceId");
-    auto credBlob  = RootHerald::JsonGet(challenge, "credentialBlob");
-    auto encSecret = RootHerald::JsonGet(challenge, "encryptedSecret");
-    if (deviceId.empty() || credBlob.empty() || encSecret.empty()) {
-        RH_LOG_WARN("[enroll-activate] challenge missing deviceId/credentialBlob/encryptedSecret\n");
-        return RH_PROTO_ERR_INVALID_PARAM;
-    }
-
-    // Re-load the AK persisted by the collect half. SelectEnrolledProvider tries
-    // the cached method (PCP) first, then probes — so it finds the AK collect
-    // just persisted even across a fresh host invocation.
-    auto provider = SelectEnrolledProvider();
-    if (!provider) {
-        RH_LOG_WARN("[enroll-activate] no AK loaded — was enroll-collect run first?\n");
-        return RH_PROTO_ERR_NOT_ENROLLED;
-    }
-
-    // The mode-defining TPM op. For PCP this is NCRYPT_PCP_TPM12_IDACTIVATION,
-    // unprivileged. The decrypted secret is the only thing the activate body
-    // carries; the server constant-time compares it against the secret it sealed
-    // to the EK in MakeCredential and Name-match guards the bound AK.
-    auto secret = provider->ActivateCredential(Base64Decode(credBlob), Base64Decode(encSecret));
-    if (secret.empty()) {
-        RH_LOG_WARN("[enroll-activate] ActivateCredential failed\n");
-        return RH_PROTO_ERR_ATTESTATION_FAILED;
-    }
-    RH_LOG_WARN("[enroll-activate] ActivateCredential OK (%zu bytes)\n", secret.size());
-
-    // Exact POST /api/v1/devices/activate body. The genuine client sends NO
-    // akPublicKey here (only the decrypted secret) — the server verifies against
-    // the AK Name MakeCredential already bound at enroll. Mirrors RunEnrollFlow.
-    std::string json = RootHerald::JsonBuild({
-        {"deviceId",        deviceId},
-        {"decryptedSecret", Base64Encode(secret.data(), secret.size())}
-    });
-    char* buf = (char*)malloc(json.size() + 1);
-    if (!buf) return RH_PROTO_ERR_INTERNAL;
-    memcpy(buf, json.c_str(), json.size() + 1);
-    *out_activate_json = buf;
-    return RH_PROTO_OK;
-}
 
 void RootHeraldSetLinkToken(const char* link_token)
 {
@@ -1172,14 +891,8 @@ RootHeraldResult RootHeraldGetStatus(RootHeraldDeviceStatus* out_status)
     RootHerald::TpmPcp pcp;
     out_status->has_tpm = pcp.IsAvailable() ? 1 : 0;
 
-    // Enrolled iff the cached backend's AK is present (defaults to probing
-    // both if no method is cached yet).
-    ActivationMethod cached = ReadCachedMethod();
-    bool enrolled = AnyAkPresent(cached);
-    if (!enrolled && cached == ActivationMethod::Unknown) {
-        enrolled = AnyAkPresent(ActivationMethod::Pcp) || AnyAkPresent(ActivationMethod::Tbs);
-    }
-    out_status->is_enrolled = enrolled ? 1 : 0;
+    // Enrolled iff the persistent-handle AK is present.
+    out_status->is_enrolled = AnyAkPresent() ? 1 : 0;
 
     // Populate device_id when we have a TPM. The deviceId is a deterministic
     // hash over the EK identity (cert when present, else pubkey — mirroring
@@ -1221,14 +934,8 @@ extern "C" RootHeraldResult RootHeraldCollectLocalPosture(RootHeraldPosture* out
     RootHerald::TpmPcp pcp;
     out_posture->has_tpm = pcp.IsAvailable() ? 1 : 0;
 
-    // Local enrollment: an AK persisted on either backend (cached-method
-    // first, then both — same probing logic GetStatus uses).
-    ActivationMethod cached = ReadCachedMethod();
-    bool enrolled = AnyAkPresent(cached);
-    if (!enrolled && cached == ActivationMethod::Unknown) {
-        enrolled = AnyAkPresent(ActivationMethod::Pcp) || AnyAkPresent(ActivationMethod::Tbs);
-    }
-    out_posture->is_enrolled = enrolled ? 1 : 0;
+    // Local enrollment: the persistent-handle AK is present.
+    out_posture->is_enrolled = AnyAkPresent() ? 1 : 0;
 
     // Vendor EK certificate cached by Windows during TPM provisioning.
     auto ekCertDer = ReadEkCertFromWindowsStore();

@@ -63,6 +63,7 @@ const char* RootHerald_ErrorString(RootHeraldStatus status)
         case ROOTHERALD_ERR_SERVER:          return "Root Herald server returned an error";
         case ROOTHERALD_ERR_QUOTA_EXCEEDED:  return "tenant quota exceeded";
         case ROOTHERALD_ERR_NOT_ENROLLED:    return "device is not enrolled";
+        case ROOTHERALD_ERR_ELEVATION_REQUIRED: return "enrollment requires an elevated process; obtain elevation and call RootHerald_RunElevatedEstablishKey, then retry";
         case ROOTHERALD_ERR_INTERNAL:        return "internal library error";
         default:                             return "unknown error";
     }

@@ -118,7 +118,8 @@ typedef enum {
     RH_PROTO_ERR_INTERNAL = 5,
     RH_PROTO_ERR_NOT_ENROLLED = 6,
     RH_PROTO_ERR_INVALID_PARAM = 7,
-    RH_PROTO_ERR_ALREADY_ENROLLED = 8  /* RootHeraldEnroll called with force_reenroll=0 on a TPM that already has a persistent AK at 0x81010001. Pass force_reenroll=1 to overwrite. */
+    RH_PROTO_ERR_ALREADY_ENROLLED = 8, /* RootHeraldEnroll called with force_reenroll=0 on a TPM that already has a persistent AK at 0x81010001. Pass force_reenroll=1 to overwrite. */
+    RH_PROTO_ERR_ELEVATION_REQUIRED = 9 /* Cold enrollment needs an elevated process (raw-TBS TPM2_ActivateCredential) but the caller is unprivileged. The SDK does NOT elevate; obtain elevation yourself and call RootHeraldRunElevatedEstablishKey. */
 } RootHeraldResult;
 
 /* Enrollment output */
@@ -186,28 +187,6 @@ ROOTHERALD_API RootHeraldResult RootHeraldAttest(
     size_t nonce_len,
     RootHeraldAttestationInfo* out_info
 );
-
-/**
- * Page-driven enrollment split (Background-Check, contract C-enroll). The TPM-
- * only halves of the enroll ceremony with the NETWORK boundary removed: the
- * page relays the two server round-trips through the customer's server, so these
- * make NO network call and need NO API/site key (like RootHeraldCollectEvidence).
- *
- * RootHeraldEnrollCollect: collect EK pub + EK cert chain + create (and persist)
- * an AK; write the exact POST /api/v1/devices/enroll body to *out_enroll_json.
- * RootHeraldEnrollActivate: TPM2_ActivateCredential over the server's
- * MakeCredential challenge blob (challenge_json == the verbatim /enroll
- * response: {deviceId, credentialBlob, encryptedSecret}); write the exact POST
- * /api/v1/devices/activate body to *out_activate_json.
- *
- * Both return heap buffers the CALLER OWNS; free with RootHeraldFreeEvidence.
- * The split moves only the network boundary — EK validation, AkTemplateValidator,
- * MakeCredential sealing, the constant-time secret compare, and the activate
- * Name-match guard all still run server-side on the relayed (byte-exact) bytes.
- */
-ROOTHERALD_API RootHeraldResult RootHeraldEnrollCollect(char** out_enroll_json);
-ROOTHERALD_API RootHeraldResult RootHeraldEnrollActivate(
-    const char* challenge_json, char** out_activate_json);
 
 /**
  * Set a one-time link token to bind the next attestation to a user account.

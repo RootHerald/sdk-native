@@ -10,6 +10,7 @@
 #include "json_helpers.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -111,12 +112,24 @@ int main(int argc, char* argv[])
     // Step 5: Exchange token (if attestation succeeded)
     if (result == RH_PROTO_OK && strlen(attestInfo.authorization_code) > 0) {
         printf("\n[5/5] Exchanging authorization code for JWT...\n");
+        // The RP client secret is a SERVER-side credential and must never be
+        // hardcoded into a shipped binary. This diagnostic tool reads it from
+        // the environment; export ROOTHERALD_TEST_CLIENT_SECRET before running
+        // the token-exchange step.
+        const char* clientSecret = std::getenv("ROOTHERALD_TEST_CLIENT_SECRET");
+        if (!clientSecret || clientSecret[0] == '\0') {
+            fprintf(stderr,
+                    "ERROR: ROOTHERALD_TEST_CLIENT_SECRET is not set.\n"
+                    "       Export the test RP's client secret before the token step, e.g.:\n"
+                    "         set ROOTHERALD_TEST_CLIENT_SECRET=<secret>\n");
+            return 1;
+        }
         std::string tokenUrl = std::string(serverUrl) + "/api/v1/token";
         std::string tokenBody =
             "grant_type=authorization_code"
             "&code=" + std::string(attestInfo.authorization_code) +
             "&client_id=plat_test_rp"
-            "&client_secret=rootherald_test_secret_do_not_use_in_production"
+            "&client_secret=" + std::string(clientSecret) +
             "&redirect_uri=http://localhost:3000/callback";
 
         // Use form-encoded POST

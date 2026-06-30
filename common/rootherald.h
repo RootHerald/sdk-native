@@ -37,12 +37,21 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define ROOTHERALD_ABI_VERSION_MAJOR 1
-#define ROOTHERALD_ABI_VERSION_MINOR 4
+#define ROOTHERALD_ABI_VERSION_MAJOR 2
+#define ROOTHERALD_ABI_VERSION_MINOR 0
 
 /*
  * ABI changelog
  * -------------
+ * 2.0 — REMOVED RootHeraldClient_EnrollCollect + RootHeraldClient_EnrollActivate
+ *       (the 1.4 PCP-only page-driven enroll split). BREAKING. Enrollment now
+ *       runs under a single elevation via RootHeraldClient_Enroll (elevated-TBS):
+ *       the host/embedder triggers that one-shot elevated ceremony rather than
+ *       relaying TPM halves through the customer server. Removed once raw-TBS
+ *       credential activation was proven to succeed under elevation, making the
+ *       PCP (SHA-1-AIK) backend — whose only value was dodging the UAC —
+ *       unnecessary. RootHeraldClient_CollectEvidence (per-request attestation)
+ *       and RootHeraldClient_Enroll are unchanged.
  * 1.4 — ADDED RootHeraldClient_EnrollCollect + RootHeraldClient_EnrollActivate
  *       (Background-Check page-driven enrollment, contract C-enroll). Additive
  *       only; every 1.3 symbol is unchanged. These are the TPM-only halves of
@@ -106,6 +115,15 @@ typedef enum {
     ROOTHERALD_ERR_SERVER = 4,
     ROOTHERALD_ERR_QUOTA_EXCEEDED = 5,
     ROOTHERALD_ERR_NOT_ENROLLED = 6,
+    /*
+     * Enrollment requires an elevated (administrator) process, but the current
+     * process is not elevated. The SDK does NOT elevate on your behalf — it
+     * reports this so YOU can choose an elevation strategy. Recover by obtaining
+     * an elevated context (your own escalation shim, our host binary, an existing
+     * privileged service) and calling RootHerald_RunElevatedEstablishKey there,
+     * then retry. Windows-only; see INTEGRATING.md ("Windows elevation").
+     */
+    ROOTHERALD_ERR_ELEVATION_REQUIRED = 7,
     ROOTHERALD_ERR_INTERNAL = 99
 } RootHeraldStatus;
 
@@ -323,17 +341,28 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
 /*
  * The "dumb client" surface for the RATS Background-Check model. The on-device
  * client collects a self-contained evidence blob and returns it to the embedder
- * — it makes NO RootHerald network call and needs NO API/site key. The embedder
- * hands the blob to the CUSTOMER's own server, which relays it server→server
- * (authenticated with its rh_sk_ secret key) to
- * `POST /api/v1/attestations/verify`, where RootHerald appraises it and returns
- * a verdict.
+ * — it makes NO RootHerald network call and needs NO API/site key.
+ *
+ * BOUNDARY — READ THIS. This is a CLIENT library. It collects evidence; it
+ * NEVER verifies anything and NEVER holds a secret. The `rh_sk_` secret key and
+ * the token/verdict verification step live in a SEPARATE component: the
+ * CUSTOMER'S BACKEND (their own server). The flow is:
+ *   1. (here, client)   collect the evidence blob — no secret, no verdict.
+ *   2. (customer server) relay the blob server→server, authenticated with the
+ *                        customer's `rh_sk_` secret key, to
+ *                        `POST /api/v1/attestations/verify`.
+ *   3. (RootHerald)     appraise it and return a verdict to the customer server.
+ * The `rh_sk_` secret MUST NOT ever be compiled into, passed to, or stored by
+ * this library — putting it on the device defeats the model. To implement
+ * step 2 in the customer backend, use a SERVER SDK (a different component):
+ * @rootherald/node, sdk-go, sdk-dotnet, sdk-java, sdk-php, or sdk-ruby at
+ * https://github.com/RootHerald.
  *
  * This is the privacy-/liability-preferred default: no client-side secret can
  * leak, and the customer's server is the trust boundary. The key-bearing
  * Passport entry points (RootHeraldClient_Create / _AttestSession / _Verify)
- * stay for the backend-less "badge" tier, which cannot hold a secret key in a
- * browser and so POSTs to RootHerald directly with a publishable key.
+ * stay for the backend-less "badge" tier; they carry only a PUBLISHABLE key
+ * (rh_pk_), never the rh_sk_ secret, and still never verify on-device.
  */
 
 /**
@@ -375,84 +404,24 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectEvidence(
 /**
  * Free an evidence buffer returned by RootHeraldClient_CollectEvidence. Safe to
  * call with NULL. Pairs with the caller-frees ownership of out_evidence_json.
- * Also frees the enroll/activate buffers returned by the ABI 1.4 page-driven
- * enrollment pair below — it is a generic char* deallocator.
+ * Also frees the evidence buffer returned by RootHeraldClient_CollectEvidence —
+ * it is a generic char* deallocator.
  */
 ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json);
 
 /* ------------------------------------------------------------------ */
-/* Background-Check page-driven enrollment (contract C-enroll, ABI 1.4) */
+/* Enrollment                                                          */
 /* ------------------------------------------------------------------ */
 /*
- * The enroll ceremony is irreducibly TWO server round-trips with a TPM op
- * between: (1) collect EK pub + EK cert chain + create an AK -> POST
- * /api/v1/devices/enroll -> the server validates the EK chain, enforces the AK
- * template, and MakeCredential-seals a secret to the EK, returning a challenge
- * blob; (2) TPM2_ActivateCredential(challenge) decrypts the secret -> POST
- * /api/v1/devices/activate -> the server constant-time compares the secret and
- * Name-match guards the bound AK -> enrolled.
- *
- * These two entry points are the TPM-only halves with the NETWORK boundary
- * removed — keyless and network-free, exactly like RootHeraldClient_CollectEvidence.
- * The page RELAYS the two round-trips through the CUSTOMER's server (which
- * authenticates to RootHerald with its rh_sk_ secret key — WP4 Option A); the
- * client makes NO RootHerald network call and consults NO API/site key, so a
- * RootHeraldClient* handle is NOT required.
- *
- * SECURITY: this moves only the network boundary. The EK-chain validation, the
- * AkTemplateValidator (closes the software-AK spoofing attack), MakeCredential
- * sealing, the constant-time secret compare, and the activate Name-match guard
- * ALL still run server-side on the relayed bytes — and the relay is byte-exact,
- * so it weakens none of them.
- *
- * PLATFORM SUPPORT: functional on Windows (PCP backend — unprivileged credential
- * activation, no UAC). Linux/macOS declare the symbols for ABI uniformity but
- * return ROOTHERALD_ERR_INTERNAL until their collectors land, consistent with
- * the other session entry points.
+ * Enrollment runs under a SINGLE elevation via RootHeraldClient_Enroll (the
+ * elevated-TBS path): the client/host triggers a one-shot elevated child that
+ * creates the AK, runs TPM2_ActivateCredential to bind it to the EK, and evicts
+ * it to a persistent handle. The earlier page-driven keyless split
+ * (RootHeraldClient_EnrollCollect / _EnrollActivate, ABI 1.4) was removed once
+ * raw-TBS activation was proven to succeed under elevation — it existed only to
+ * dodge the UAC via PCP, whose AIK is locked to a SHA-1 scheme. Per-request
+ * attestation (RootHeraldClient_CollectEvidence) remains unprivileged.
  */
-
-/**
- * Collect EK pub + EK cert chain + create (and persist) an AK; return the exact
- * JSON body for POST /api/v1/devices/enroll. Makes NO network call and needs NO
- * API/site key.
- *
- *   out_enroll_json : on ROOTHERALD_OK, receives a newly-allocated, NUL-
- *                     terminated JSON string — the verbatim /enroll request body
- *                     ({ekPublicKey, akPublicArea, platform, optional ekCertPem,
- *                     optional ekCertificateChain}). The customer's server posts
- *                     it to RootHerald and relays the MakeCredential challenge
- *                     back to RootHeraldClient_EnrollActivate. Caller OWNS the
- *                     buffer; free with RootHeraldClient_FreeEvidence. NULL on error.
- *
- * Returns ROOTHERALD_OK on success; ROOTHERALD_ERR_TPM_UNAVAILABLE /
- * ROOTHERALD_ERR_SERVER on a TPM / AK-creation failure; ROOTHERALD_ERR_INVALID_ARG
- * on a bad argument.
- */
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollCollect(
-    char** out_enroll_json);
-
-/**
- * TPM2_ActivateCredential over the server's MakeCredential challenge; return the
- * exact JSON body for POST /api/v1/devices/activate. Makes NO network call and
- * needs NO API/site key.
- *
- *   challenge_json    : the verbatim JSON the server returned from /enroll
- *                       ({deviceId, credentialBlob, encryptedSecret}), relayed by
- *                       the page. Required.
- *   out_activate_json : on ROOTHERALD_OK, receives a newly-allocated, NUL-
- *                       terminated JSON string — the verbatim /activate request
- *                       body ({deviceId, decryptedSecret}). The genuine client
- *                       sends NO akPublicKey here; the server verifies against the
- *                       AK Name MakeCredential bound at enroll. Caller OWNS the
- *                       buffer; free with RootHeraldClient_FreeEvidence. NULL on error.
- *
- * Returns ROOTHERALD_OK on success; ROOTHERALD_ERR_NOT_ENROLLED if no AK from a
- * prior EnrollCollect is present; ROOTHERALD_ERR_SERVER if ActivateCredential
- * fails; ROOTHERALD_ERR_INVALID_ARG on a bad/incomplete challenge.
- */
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollActivate(
-    const char* challenge_json,
-    char** out_activate_json);
 
 /**
  * Elevated-child entry for the Windows TBS activation fallback (public
