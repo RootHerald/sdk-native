@@ -86,18 +86,24 @@ extern "C" {
  *   { "deviceId", "decryptedSecret" }
  *   -> 200 on success.
  *
- * POST /api/v1/attest
+ * POST /api/v1/attestations/verify   (customer BACKEND -> server, rh_sk_ auth)
+ *   The keyless client (RootHeraldClient_CollectEvidence) emits the `evidence`
+ *   object below and hands it to the embedder; the customer's BACKEND relays it
+ *   here. The client never POSTs this itself and holds no key. (ABI 3.0 removed
+ *   the old client-side Passport `POST /api/v1/attest` direct path.)
+ *   evidence:
  *   {
- *     "sessionId":  "...",
- *     "deviceId":   "..." (optional),
- *     "linkToken":  "..." (optional, one-time),
+ *     "deviceId":   "..." (the enrolled device; EK-derived when not overridden),
  *     "pcrValues":  { "sha256": { "0": "<hex>", ... } },
- *     "quote": {                          // ADDED 2026-05.
+ *     "quote": {
  *       "quoted":    "<base64 TPMS_ATTEST>",
  *       "signature": "<base64 TPMT_SIGNATURE>",
- *       "nonce":     "<base64>"           // == the server's challenge nonce.
+ *       "nonce":     "<base64>"           // == the backend's challenge nonce.
  *     },
- *     "secureBootChain": { ... } | null
+ *     "eventLog":        "<base64 TCG log>",
+ *     "secureBootChain": { ... } | null,
+ *     "ekCertPem":           "...PEM..." (optional),
+ *     "ekCertificateChain":  ["...PEM..."] (optional)
  *   }
  *   The server MUST verify `signature` against the AK pub stored at
  *   enrollment, MUST verify `quoted.extraData == nonce`, and MUST verify
@@ -118,7 +124,8 @@ typedef enum {
     RH_PROTO_ERR_INTERNAL = 5,
     RH_PROTO_ERR_NOT_ENROLLED = 6,
     RH_PROTO_ERR_INVALID_PARAM = 7,
-    RH_PROTO_ERR_ALREADY_ENROLLED = 8  /* RootHeraldEnroll called with force_reenroll=0 on a TPM that already has a persistent AK at 0x81010001. Pass force_reenroll=1 to overwrite. */
+    RH_PROTO_ERR_ALREADY_ENROLLED = 8, /* RootHeraldEnroll called with force_reenroll=0 on a TPM that already has a persistent AK at 0x81010001. Pass force_reenroll=1 to overwrite. */
+    RH_PROTO_ERR_ELEVATION_REQUIRED = 9 /* Cold enrollment needs an elevated process (raw-TBS AK create + TPM2_ActivateCredential) but the caller is unprivileged. The SDK does NOT elevate; run the keyless EnrollBegin/EnrollComplete in an elevated resident worker (the single elevation spans both). */
 } RootHeraldResult;
 
 /* Enrollment output */
@@ -146,15 +153,25 @@ typedef struct {
 } RootHeraldDeviceStatus;
 
 /*
- * DEPRECATED (2026-06): the global functions below are the legacy,
- * pre-handle SDK surface. New integrations should use the handle-based
- * RootHeraldClient_* API declared in <rootherald.h> instead
- * (RootHeraldClient_Enroll / RootHeraldClient_AttestSession /
- * RootHeraldClient_SetLinkToken / RootHeraldClient_GetDeviceInfo and
- * RootHerald_RunElevatedEstablishKey). The handle API carries the
- * tenant's publishable site key on every request and is the only
- * surface that gains new capabilities. These globals keep shipping for
- * existing consumers but will not be extended.
+ * DEPRECATED / INTERNAL legacy surface. The global functions below are the
+ * pre-handle SDK surface. New integrations use the handle-based, KEYLESS
+ * RootHeraldClient_* API in <rootherald.h> (EnrollBegin / EnrollComplete /
+ * CollectEvidence / CollectPosture / GetDeviceInfo).
+ *
+ * These globals are retained for: (a) the Linux/macOS legacy driver
+ * implementation (rootherald_linux.c / rootherald_macos.m still define
+ * RootHeraldEnroll / RootHeraldAttest / RootHeraldGetStatus, used by the
+ * non-CI native_host samples), and (b) Windows-internal keyless helpers the
+ * facade builds on (RootHeraldGetStatus, RootHeraldSetDeviceId). They are NOT
+ * the public surface and gain no new capabilities.
+ *
+ * ABI 3.0 (Windows) removed the network-bearing direct-POST globals
+ * RootHeraldEnroll / RootHeraldAttest, the one-shot link-token global
+ * RootHeraldSetLinkToken, and the elevated-enroll worker
+ * RootHeraldRunElevatedEstablishKey from the Windows build — the Windows SDK
+ * opens no socket to RootHerald and enrollment is the keyless EnrollBegin /
+ * EnrollComplete handshake. (The Enroll/Attest *declarations* remain here only
+ * because the Linux/macOS legacy drivers still implement them.)
  */
 
 /**
@@ -188,14 +205,9 @@ ROOTHERALD_API RootHeraldResult RootHeraldAttest(
 );
 
 /**
- * Set a one-time link token to bind the next attestation to a user account.
- * Call this before RootHeraldAttest. The token is consumed after one use.
- */
-ROOTHERALD_API void RootHeraldSetLinkToken(const char* link_token);
-
-/**
- * Set the device ID to include in the next attestation POST body.
- * Call this before RootHeraldAttest so the backend can resolve the session to a device.
+ * Set an optional device ID override to bind into collected evidence (the
+ * keyless CollectEvidence path reads it; empty -> deviceId is derived from the
+ * EK). Windows-internal host hook; no network.
  */
 ROOTHERALD_API void RootHeraldSetDeviceId(const char* device_id);
 
@@ -204,19 +216,6 @@ ROOTHERALD_API void RootHeraldSetDeviceId(const char* device_id);
  */
 ROOTHERALD_API RootHeraldResult RootHeraldGetStatus(
     RootHeraldDeviceStatus* out_status
-);
-
-/**
- * Elevated-child entry point for the TBS activation fallback. RootHeraldEnroll
- * spawns the current executable elevated with `--establish-key <url> <path>`;
- * the elevated instance calls this to run the raw-TBS enroll + activation
- * (which Windows TBS only permits for an elevated caller) and writes the
- * resulting deviceId to result_path. Returns 0 on success. Hosts must route
- * the `--establish-key` CLI argument here before any normal startup.
- */
-ROOTHERALD_API int RootHeraldRunElevatedEstablishKey(
-    const char* server_url,
-    const char* result_path
 );
 
 #ifdef __cplusplus

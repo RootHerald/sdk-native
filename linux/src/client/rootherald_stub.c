@@ -10,6 +10,11 @@
  * NEVER ship this in production — RootHerald_LibraryVersionString() prefixes
  * the version with "stub-" so callers can detect it at runtime.
  *
+ * ABI 3.0: keyless surface — Create() takes no args; enrollment is the
+ * EnrollBegin/EnrollComplete blob handshake; per-attestation evidence is
+ * CollectEvidence. The stub returns canned blobs that echo enough structure for
+ * a test harness to assert round-trip wiring. No hardware, no network.
+ *
  * Wave 6: this stub is built as part of librootherald.a (STATIC). No
  * symbol-export decoration is needed.
  */
@@ -20,7 +25,6 @@
 #include <string.h>
 
 struct RootHeraldClient {
-    char  endpoint[512];
     char  app_id[128];
     int   mock_tpm;
 };
@@ -34,26 +38,24 @@ static void copy_string(char* dst, size_t cap, const char* src) {
     dst[n] = '\0';
 }
 
-ROOTHERALD_API RootHeraldClient* RootHeraldClient_Create(
-    const char* api_key, const char* endpoint)
+/* Heap-allocate a copy of a canned JSON blob; caller frees with
+ * RootHeraldClient_FreeEvidence (which is free()). */
+static RootHeraldStatus emit_blob(const char* json, char** out) {
+    size_t n = strlen(json) + 1;
+    char* buf = (char*)malloc(n);
+    if (!buf) return ROOTHERALD_ERR_INTERNAL;
+    memcpy(buf, json, n);
+    *out = buf;
+    return ROOTHERALD_OK;
+}
+
+ROOTHERALD_API RootHeraldClient* RootHeraldClient_Create(void)
 {
-    if (!api_key || !api_key[0]) return NULL;
     RootHeraldClient* c = (RootHeraldClient*)calloc(1, sizeof(*c));
-    if (!c) return NULL;
-    copy_string(c->endpoint, sizeof(c->endpoint),
-                (endpoint && endpoint[0]) ? endpoint : "https://rootherald.io");
     return c;
 }
 
 ROOTHERALD_API void RootHeraldClient_Destroy(RootHeraldClient* client) { free(client); }
-
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetEndpoint(
-    RootHeraldClient* client, const char* endpoint)
-{
-    if (!client || !endpoint) return ROOTHERALD_ERR_INVALID_ARG;
-    copy_string(client->endpoint, sizeof(client->endpoint), endpoint);
-    return ROOTHERALD_OK;
-}
 
 ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetApplicationId(
     RootHeraldClient* client, const char* app_id)
@@ -71,55 +73,29 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetMockTpm(
     return ROOTHERALD_OK;
 }
 
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_Verify(
-    RootHeraldClient* client, const char* action, RootHeraldVerifyResult* out_result)
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollBegin(
+    RootHeraldClient* client, char** out_request_json)
 {
-    (void)action;
-    if (!client || !out_result) return ROOTHERALD_ERR_INVALID_ARG;
-    memset(out_result, 0, sizeof(*out_result));
-    out_result->verdict = ROOTHERALD_VERDICT_ALLOW;
-    copy_string(out_result->device_id, sizeof(out_result->device_id),
-                "00000000-0000-4000-8000-000000000stub");
-    copy_string(out_result->tpm_class, sizeof(out_result->tpm_class), "stub");
-    copy_string(out_result->posture_json, sizeof(out_result->posture_json),
-                "{\"stub\":true,\"secure_boot\":true}");
-    copy_string(out_result->reason, sizeof(out_result->reason), "stub library");
-    return ROOTHERALD_OK;
+    /* Canned POST /devices/enroll body. Stub only — never ship. */
+    if (out_request_json) *out_request_json = NULL;
+    if (!client || !out_request_json) return ROOTHERALD_ERR_INVALID_ARG;
+    return emit_blob(
+        "{\"stub\":true,\"ekPublicKey\":\"c3R1Yi1lay1wdWI=\","
+        "\"akPublicArea\":\"c3R1Yi1hay1wdWI=\",\"platform\":\"stub\"}",
+        out_request_json);
 }
 
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_Enroll(
-    RootHeraldClient* client, int force_reenroll, RootHeraldEnrollResult* out_result)
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollComplete(
+    RootHeraldClient* client, const char* challenge_json, char** out_activation_json)
 {
-    (void)force_reenroll;
-    if (!client || !out_result) return ROOTHERALD_ERR_INVALID_ARG;
-    memset(out_result, 0, sizeof(*out_result));
-    copy_string(out_result->device_id, sizeof(out_result->device_id),
-                "00000000-0000-4000-8000-000000000stub");
-    return ROOTHERALD_OK;
-}
-
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_AttestSession(
-    RootHeraldClient* client, const char* session_id, const char* nonce_b64,
-    RootHeraldAttestResult* out_result)
-{
-    if (!client || !out_result || !session_id || !session_id[0] ||
-        !nonce_b64 || !nonce_b64[0])
+    /* Canned POST /devices/activate body. Stub only — never ship. */
+    if (out_activation_json) *out_activation_json = NULL;
+    if (!client || !out_activation_json || !challenge_json || !challenge_json[0])
         return ROOTHERALD_ERR_INVALID_ARG;
-    memset(out_result, 0, sizeof(*out_result));
-    copy_string(out_result->session_id, sizeof(out_result->session_id), session_id);
-    copy_string(out_result->status, sizeof(out_result->status), "verified");
-    copy_string(out_result->authorization_code, sizeof(out_result->authorization_code),
-                "stub-authorization-code");
-    copy_string(out_result->reason, sizeof(out_result->reason), "stub library");
-    return ROOTHERALD_OK;
-}
-
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetLinkToken(
-    RootHeraldClient* client, const char* link_token)
-{
-    (void)link_token;
-    if (!client) return ROOTHERALD_ERR_INVALID_ARG;
-    return ROOTHERALD_OK;
+    return emit_blob(
+        "{\"stub\":true,\"deviceId\":\"00000000-0000-4000-8000-000000000stub\","
+        "\"decryptedSecret\":\"c3R1Yi1zZWNyZXQ=\"}",
+        out_activation_json);
 }
 
 ROOTHERALD_API RootHeraldStatus RootHeraldClient_GetDeviceInfo(
@@ -155,13 +131,36 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
     return ROOTHERALD_OK;
 }
 
-ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(
-    const char* server_url, const char* result_path)
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectEvidence(
+    const char* nonce_b64, char** out_evidence_json)
 {
-    (void)server_url;
-    (void)result_path;
-    return 0;
+    /* Per-attestation collect (keyless, handle-less). Canned mock evidence —
+     * never touches hardware or the network. The blob echoes the relayed nonce
+     * so a test harness can assert round-trip wiring. Caller frees via
+     * RootHeraldClient_FreeEvidence. NEVER ship the stub in production. */
+    if (!out_evidence_json) return ROOTHERALD_ERR_INVALID_ARG;
+    *out_evidence_json = NULL;
+    if (!nonce_b64 || !nonce_b64[0]) return ROOTHERALD_ERR_INVALID_ARG;
+
+    const char* prefix = "{\"stub\":true,\"deviceId\":"
+                         "\"00000000-0000-4000-8000-000000000stub\","
+                         "\"quote\":{\"nonce\":\"";
+    const char* suffix = "\"}}";
+    size_t n = strlen(prefix) + strlen(nonce_b64) + strlen(suffix) + 1;
+    char* buf = (char*)malloc(n);
+    if (!buf) return ROOTHERALD_ERR_INTERNAL;
+    buf[0] = '\0';
+    strcat(buf, prefix);
+    strcat(buf, nonce_b64);
+    strcat(buf, suffix);
+    *out_evidence_json = buf;
+    return ROOTHERALD_OK;
 }
 
-ROOTHERALD_API const char* RootHerald_AbiVersionString(void)  { return "1.2"; }
+ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json)
+{
+    free(evidence_json);
+}
+
+ROOTHERALD_API const char* RootHerald_AbiVersionString(void)  { return "3.0"; }
 ROOTHERALD_API const char* RootHerald_LibraryVersionString(void) { return "stub-0.2.0"; }

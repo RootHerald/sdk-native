@@ -1,7 +1,9 @@
 # RootHerald Unreal Engine Sample Plugin
 
 A minimal Unreal Engine 5 plugin (`RootHeraldUE`) that dynamically loads
-`RootHerald.dll` and exposes a Blueprint-callable `Verify(Action)` function.
+`RootHerald.dll` and exposes a Blueprint-callable `CollectEvidence(NonceB64)`
+function (ABI 3.0 — keyless). The client emits an evidence blob; your game
+backend relays it to RootHerald and enforces the verdict server-side.
 
 ## Drop-in steps
 
@@ -17,7 +19,7 @@ A minimal Unreal Engine 5 plugin (`RootHeraldUE`) that dynamically loads
 3. Regenerate your project files (right-click the `.uproject` →
    *Generate Visual Studio project files*).
 4. Open the editor → *Edit → Plugins → Installed → RootHeraldUE → Enabled*.
-5. Add the *Verify Device* Blueprint node to your game-launch Blueprint
+5. Add the *Collect Evidence* Blueprint node to your game-launch Blueprint
    (see `Content/Sample/BP_LauncherGate.uasset` once you import the sample
    content from `SampleContent/`).
 
@@ -26,16 +28,20 @@ A minimal Unreal Engine 5 plugin (`RootHeraldUE`) that dynamically loads
 ```cpp
 #include "RootHeraldClient.h"
 
-void AMyGameMode::OnPlayerJoined(APlayerController* PC)
+void AMyGameMode::OnPlayerJoined(APlayerController* PC, const FString& NonceB64)
 {
+    // NonceB64 came from YOUR backend (POST /api/v1/.../challenge).
     URootHeraldClient* Client = NewObject<URootHeraldClient>();
-    Client->Initialize(TEXT("rh_pk_live_REPLACE_ME"), TEXT("https://rootherald.io"));
-    FRootHeraldVerifyResult R = Client->Verify(TEXT("match-join"));
-    if (R.Verdict != ERootHeraldVerdict::Allow)
+    Client->Initialize();                                  // keyless: no key, no endpoint
+    FString Evidence = Client->CollectEvidence(NonceB64);  // local quote over the nonce
+    if (Evidence.IsEmpty())
     {
-        UE_LOG(LogGame, Warning, TEXT("RH denied: %s"), *R.Reason);
-        PC->ClientWasKicked(FText::FromString(TEXT("Device verification failed.")));
+        UE_LOG(LogGame, Warning, TEXT("RH evidence collection failed"));
+        return;
     }
+    // Send Evidence to YOUR backend, which relays it to
+    // POST /api/v1/attestations/verify (rh_sk_ auth) and enforces the verdict.
+    SendEvidenceToBackend(PC, Evidence);
 }
 ```
 
@@ -44,9 +50,10 @@ void AMyGameMode::OnPlayerJoined(APlayerController* PC)
 The sample Blueprint `BP_LauncherGate` wires:
 
 1. `Event BeginPlay` →
-2. `Initialize Root Herald Client` (publishable key, endpoint URL) →
-3. `Verify Device` (action = "game-launch") →
-4. `Branch` on the verdict → `Open Level` (main menu) / `Show Error`.
+2. `Initialize Root Herald Client` (keyless — no args) →
+3. `Collect Evidence` (nonce from your backend) →
+4. Send the evidence blob to your backend, which relays it and enforces the
+   verdict, then signals the client to `Open Level` / `Show Error`.
 
 A screenshot of the assembled graph lives at
 `SampleContent/Screenshots/BP_LauncherGate.png` (placeholder; capture from

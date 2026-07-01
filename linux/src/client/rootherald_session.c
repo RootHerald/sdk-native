@@ -1,13 +1,12 @@
 /**
- * Root Herald — session-flow public ABI stubs (Linux).
+ * Root Herald — keyless enroll + local-info public ABI stubs (Linux).
  *
- * The session-based attestation surface (RootHeraldClient_Enroll /
- * RootHeraldClient_AttestSession / RootHeraldClient_SetLinkToken /
- * RootHeraldClient_GetDeviceInfo / RootHeraldClient_CollectPosture /
- * RootHerald_RunElevatedEstablishKey) is fully implemented on Windows
- * only. These stubs keep librootherald.a ABI-complete on Linux until the
- * tpm2-tss-backed implementation lands: every entry point validates
- * arguments, logs once, and returns ROOTHERALD_ERR_INTERNAL.
+ * The keyless enrollment handshake (RootHeraldClient_EnrollBegin /
+ * RootHeraldClient_EnrollComplete) and the local-info surface
+ * (RootHeraldClient_GetDeviceInfo / RootHeraldClient_CollectPosture) are fully
+ * implemented on Windows only. These stubs keep librootherald.a ABI-complete on
+ * Linux until the tpm2-tss-backed implementation lands: every entry point
+ * validates arguments, logs once, and returns ROOTHERALD_ERR_INTERNAL.
  */
 
 #include "rootherald.h"
@@ -15,34 +14,22 @@
 
 #include <string.h>
 
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_Enroll(
-    RootHeraldClient* client, int force_reenroll, RootHeraldEnrollResult* out_result)
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollBegin(
+    RootHeraldClient* client, char** out_request_json)
 {
-    (void)force_reenroll;
-    if (!client || !out_result) return ROOTHERALD_ERR_INVALID_ARG;
-    memset(out_result, 0, sizeof(*out_result));
-    RH_LOG_WARN("RootHeraldClient_Enroll: not implemented on this platform yet\n");
+    if (out_request_json) *out_request_json = NULL;
+    if (!client || !out_request_json) return ROOTHERALD_ERR_INVALID_ARG;
+    RH_LOG_WARN("RootHeraldClient_EnrollBegin: not implemented on this platform yet\n");
     return ROOTHERALD_ERR_INTERNAL;
 }
 
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_AttestSession(
-    RootHeraldClient* client, const char* session_id, const char* nonce_b64,
-    RootHeraldAttestResult* out_result)
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollComplete(
+    RootHeraldClient* client, const char* challenge_json, char** out_activation_json)
 {
-    if (!client || !out_result || !session_id || !session_id[0] ||
-        !nonce_b64 || !nonce_b64[0])
+    if (out_activation_json) *out_activation_json = NULL;
+    if (!client || !out_activation_json || !challenge_json || !challenge_json[0])
         return ROOTHERALD_ERR_INVALID_ARG;
-    memset(out_result, 0, sizeof(*out_result));
-    RH_LOG_WARN("RootHeraldClient_AttestSession: not implemented on this platform yet\n");
-    return ROOTHERALD_ERR_INTERNAL;
-}
-
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetLinkToken(
-    RootHeraldClient* client, const char* link_token)
-{
-    (void)link_token;
-    if (!client) return ROOTHERALD_ERR_INVALID_ARG;
-    RH_LOG_WARN("RootHeraldClient_SetLinkToken: not implemented on this platform yet\n");
+    RH_LOG_WARN("RootHeraldClient_EnrollComplete: not implemented on this platform yet\n");
     return ROOTHERALD_ERR_INTERNAL;
 }
 
@@ -61,14 +48,5 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
     if (!client || !out_result) return ROOTHERALD_ERR_INVALID_ARG;
     memset(out_result, 0, sizeof(*out_result));
     RH_LOG_WARN("RootHeraldClient_CollectPosture: not implemented on this platform yet\n");
-    return ROOTHERALD_ERR_INTERNAL;
-}
-
-ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(
-    const char* server_url, const char* result_path)
-{
-    (void)server_url;
-    (void)result_path;
-    RH_LOG_WARN("RootHerald_RunElevatedEstablishKey: not implemented on this platform yet\n");
     return ROOTHERALD_ERR_INTERNAL;
 }

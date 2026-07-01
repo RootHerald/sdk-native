@@ -20,14 +20,16 @@ namespace RootHerald.UnitySample
 {
     public class RootHeraldGate : MonoBehaviour
     {
-        [Tooltip("Publishable key; OK to embed in client builds.")]
-        public string PublishableKey = "rh_pk_live_REPLACE_ME";
+        // ABI 3.0 — keyless client. There is NO key or endpoint to embed: the
+        // client collects an evidence blob locally and hands it to YOUR backend,
+        // which relays it to RootHerald (with its rh_sk_) and enforces the verdict.
+        // Wire your backend's challenge nonce in, and send the evidence blob back.
 
-        [Tooltip("Base endpoint URL. Use https://rootherald.io for direct, "
-               + "https://attest.<your-domain> for custom-domain transport mode.")]
-        public string Endpoint = "https://rootherald.io";
+        [Tooltip("Your backend's challenge endpoint (issues the nonce, relays the "
+               + "evidence to RootHerald, returns the enforced verdict).")]
+        public string BackendUrl = "https://api.your-game.example/rh";
 
-        [Tooltip("Status text element; populated with the verdict at runtime.")]
+        [Tooltip("Status text element; populated with the backend's verdict at runtime.")]
         public Text StatusText;
 
         [Tooltip("UI button that initiates the verify flow.")]
@@ -62,22 +64,21 @@ namespace RootHerald.UnitySample
         }
 
         /// <summary>
-        /// Demonstrates the RootHerald.Native usage pattern. The real call
-        /// shape (RootHeraldClient ctor + VerifyAsync) is the same on every
+        /// Demonstrates the keyless RootHerald.Native usage pattern. The client
+        /// collects an evidence blob over a backend-issued nonce; your backend
+        /// relays it and returns the enforced verdict. Same shape on every
         /// platform; only the underlying P/Invoke target differs.
         /// </summary>
         public async Task<bool> CheckSignup()
         {
-            // The lines below reflect the RootHerald.Native NuGet wrapper's
-            // public API from Wave 2. We comment them out so the sample
-            // compiles even before the NuGet package is added to the
-            // project — uncomment once you've installed RootHerald.Native.
+            // The lines below reflect the keyless RootHerald.Native wrapper's API
+            // (mirrors C ABI 3.0). Commented out so the sample compiles before the
+            // package is added — uncomment once RootHerald.Native is installed.
             //
-            //   using var client = new RootHerald.RootHeraldClient(
-            //       apiKey:   PublishableKey,
-            //       endpoint: Endpoint);
-            //   var result = await client.VerifyAsync("signup");
-            //   return result.Verdict == RootHerald.Verdict.Allow;
+            //   string nonce = await MyBackend.GetChallengeNonce(BackendUrl);
+            //   using var client = new RootHerald.RootHeraldClient();   // keyless
+            //   string evidence = client.CollectEvidence(nonce);
+            //   return await MyBackend.RelayAndVerify(BackendUrl, evidence);
 
             await Task.Delay(250);  // stub — replace with the above.
             return true;

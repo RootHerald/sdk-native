@@ -1,24 +1,34 @@
-// Minimal RootHerald integration on Windows.
+// Minimal RootHerald integration on Windows (ABI 3.0 — keyless client).
 //
 // Build (from sdk-native/):
 //   cmake -B build/sample-min-win -S samples/minimal/windows -G "Visual Studio 17 2022" -A x64
 //   cmake --build build/sample-min-win --config Release
 //
 // Run:
-//   set ROOTHERALD_API_KEY=rh_pk_live_xxx
 //   build\sample-min-win\Release\rh_minimal.exe
-//       → one-shot Verify flow (default)
-//   build\sample-min-win\Release\rh_minimal.exe --session <session_id> <nonce_b64>
-//       → server-challenge session flow (Enroll + AttestSession); the session
-//         id and base64 nonce come from YOUR backend's challenge endpoint
-//   build\sample-min-win\Release\rh_minimal.exe --establish-key <url> <path>
-//       → elevated-child hook. The SDK spawns this elevated when raw-TBS
-//         credential activation is needed; hosts MUST route it before normal
-//         startup (see INTEGRATING.md). Never invoked by hand.
+//       → local device info + posture (PreCheck), then emit the enroll-begin blob
+//   build\sample-min-win\Release\rh_minimal.exe --collect <nonce_b64>
+//       → emit the per-attestation evidence blob for the given backend nonce
+//
+// ── The keyless model ───────────────────────────────────────────────────────
+// The client holds NO RootHerald key and opens NO socket to RootHerald. It does
+// local TPM work and hands OPAQUE JSON BLOBS to you; YOUR BACKEND (a server SDK
+// authenticated with its rh_sk_) relays them to RootHerald:
+//   - EnrollBegin()    -> /devices/enroll request blob   -> backend POSTs it
+//   - EnrollComplete(challenge) -> /devices/activate blob -> backend POSTs it
+//   - CollectEvidence(nonce) -> evidence blob            -> backend POSTs /verify
+//
+// ── Windows elevation + single-elevation span ───────────────────────────────
+// EnrollBegin (raw-TBS AK creation) and EnrollComplete (TPM2_ActivateCredential)
+// require an ELEVATED process, and the SAME process must stay resident across the
+// two calls (the transient EK+AK context EnrollComplete needs lives only in the
+// process that called EnrollBegin). The SDK never elevates on your behalf — it
+// returns ROOTHERALD_ERR_ELEVATION_REQUIRED so you choose a strategy (run an
+// elevated worker that emits the begin blob over IPC, waits for your backend's
+// relayed challenge, then calls complete). See INTEGRATING.md.
 
 #include <rootherald.h>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 
 static void rh_log(RootHeraldLogLevel level, const char* msg, void* /*user_data*/) {
@@ -26,102 +36,62 @@ static void rh_log(RootHeraldLogLevel level, const char* msg, void* /*user_data*
     std::fprintf(stderr, "[rh %s] %s\n", kLevelTag[level], msg);
 }
 
-// Server-challenge session flow: your backend created an attestation session
-// and handed this device the session id + base64 nonce; we answer the
-// challenge with a fresh hardware quote and print the authorization code the
-// backend redeems.
-static int RunSessionFlow(RootHeraldClient* client, const char* session_id,
-                          const char* nonce_b64) {
-    RootHeraldEnrollResult enrolled{};
-    RootHeraldStatus status = RootHeraldClient_Enroll(client, /*force_reenroll=*/0, &enrolled);
-    if (status != ROOTHERALD_OK) {
-        std::fprintf(stderr, "Enroll failed: %s\n", RootHerald_ErrorString(status));
-        return 1;
-    }
-    std::printf("enrolled device=%s\n", enrolled.device_id);
-
-    RootHeraldAttestResult attested{};
-    status = RootHeraldClient_AttestSession(client, session_id, nonce_b64, &attested);
-    if (status != ROOTHERALD_OK) {
-        std::fprintf(stderr, "AttestSession failed: %s (status=%s reason=%s)\n",
-                     RootHerald_ErrorString(status), attested.status, attested.reason);
-        return 1;
-    }
-    std::printf("session=%s status=%s authorization_code=%s\n",
-                attested.session_id, attested.status, attested.authorization_code);
-    if (attested.redirect_uri[0]) std::printf("redirect_uri=%s\n", attested.redirect_uri);
-    return 0;
-}
-
 int main(int argc, char** argv) {
-    // Hosting requirement: route the SDK's elevated-child argv to the SDK
-    // before any normal startup (Windows TBS only permits credential
-    // activation for an elevated caller).
-    if (argc >= 4 && std::strcmp(argv[1], "--establish-key") == 0) {
-        return RootHerald_RunElevatedEstablishKey(argv[2], argv[3]);
-    }
-
-    const char* api_key = std::getenv("ROOTHERALD_API_KEY");
-    if (!api_key || !*api_key) {
-        std::fprintf(stderr, "ROOTHERALD_API_KEY not set\n");
-        return 2;
-    }
-
     RootHerald_SetLogCallback(rh_log, nullptr);
     RootHerald_SetLogLevel(ROOTHERALD_LOG_INFO);
 
-    RootHeraldClient* client = RootHeraldClient_Create(api_key, /*endpoint=*/nullptr);
+    RootHeraldClient* client = RootHeraldClient_Create();
     if (!client) {
         std::fprintf(stderr, "RootHeraldClient_Create failed\n");
         return 1;
     }
 
-    // Local-only device status — never touches the network.
+    // --collect <nonce_b64>: emit a per-attestation evidence blob for your backend.
+    if (argc >= 3 && std::strcmp(argv[1], "--collect") == 0) {
+        char* evidence = nullptr;
+        RootHeraldStatus st = RootHeraldClient_CollectEvidence(argv[2], &evidence);
+        if (st != ROOTHERALD_OK || !evidence) {
+            std::fprintf(stderr, "CollectEvidence failed: %s\n", RootHerald_ErrorString(st));
+            RootHeraldClient_Destroy(client);
+            return 1;
+        }
+        std::printf("evidence (relay to POST /api/v1/attestations/verify):\n%s\n", evidence);
+        RootHeraldClient_FreeEvidence(evidence);
+        RootHeraldClient_Destroy(client);
+        return 0;
+    }
+
+    // Local-only device info — never touches the network.
     RootHeraldDeviceInfo info{};
     if (RootHeraldClient_GetDeviceInfo(client, &info) == ROOTHERALD_OK) {
         std::printf("platform=%s has_tpm=%d is_enrolled=%d device=%s\n",
                     info.platform_name, info.has_tpm, info.is_enrolled, info.device_id);
     }
 
-    // Local-only readiness posture — the free pre-flight check. Never touches
-    // the network, so it runs unconditionally. These are readiness SIGNALS,
-    // not a verdict; the verdict is always server-side (Verify/AttestSession).
+    // PreCheck: local readiness snapshot (signals, never a verdict).
     RootHeraldPosture posture{};
     if (RootHeraldClient_CollectPosture(client, &posture) == ROOTHERALD_OK) {
-        std::printf("posture: has_tpm=%d is_enrolled=%d ek_cert_present=%d "
-                    "secure_boot=%d oem_keyed=%d oem_name=%s "
-                    "boot_log_measurements=%d boot_log_revoked=%d device_id=%s\n",
+        std::printf("posture: tpm=%d enrolled=%d ek_cert=%d secure_boot=%d oem_keyed=%d (%s)\n",
                     posture.has_tpm, posture.is_enrolled, posture.ek_cert_present,
-                    posture.secure_boot, posture.oem_keyed, posture.oem_name,
-                    posture.boot_log_measurements, posture.boot_log_revoked,
-                    posture.device_id);
-        std::printf("posture detail: %s\n", posture.detail_json);
+                    posture.secure_boot, posture.oem_keyed, posture.oem_name);
     }
 
-    // Session flow only when explicitly requested — the session id and nonce
-    // must come from a real backend challenge, so the default standalone run
-    // sticks to Verify.
-    if (argc >= 4 && std::strcmp(argv[1], "--session") == 0) {
-        int rc = RunSessionFlow(client, argv[2], argv[3]);
-        RootHeraldClient_Destroy(client);
-        return rc;
+    // Enroll, leg 1: emit the /devices/enroll request blob. Your backend relays
+    // it, gets a MakeCredential challenge, and feeds it to EnrollComplete IN THIS
+    // SAME (elevated, resident) process. Requires elevation.
+    char* enroll_request = nullptr;
+    RootHeraldStatus st = RootHeraldClient_EnrollBegin(client, &enroll_request);
+    if (st == ROOTHERALD_ERR_ELEVATION_REQUIRED) {
+        std::fprintf(stderr,
+            "enrollment requires an elevated, resident process (see the elevation\n"
+            "note at the top of this file and INTEGRATING.md)\n");
+    } else if (st == ROOTHERALD_OK && enroll_request) {
+        std::printf("enroll-begin (relay to POST /api/v1/devices/enroll):\n%s\n", enroll_request);
+        std::printf("[next: relay the challenge back to EnrollComplete in THIS process]\n");
+        RootHeraldClient_FreeEvidence(enroll_request);
+    } else {
+        std::fprintf(stderr, "EnrollBegin failed: %s\n", RootHerald_ErrorString(st));
     }
-
-    RootHeraldVerifyResult result{};
-    RootHeraldStatus status = RootHeraldClient_Verify(client, "sample-launch", &result);
-    if (status != ROOTHERALD_OK) {
-        std::fprintf(stderr, "Verify failed: %s\n", RootHerald_ErrorString(status));
-        RootHeraldClient_Destroy(client);
-        return 1;
-    }
-
-    const char* verdict_name =
-        result.verdict == ROOTHERALD_VERDICT_ALLOW ? "ALLOW" :
-        result.verdict == ROOTHERALD_VERDICT_WARN  ? "WARN"  : "DENY";
-
-    std::printf("verdict=%s device=%s tpm_class=%s\n",
-                verdict_name, result.device_id, result.tpm_class);
-    if (result.reason[0]) std::printf("reason=%s\n", result.reason);
 
     RootHeraldClient_Destroy(client);
     return 0;
