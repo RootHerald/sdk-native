@@ -6,41 +6,17 @@
 #include "UObject/NoExportTypes.h"
 #include "RootHeraldClient.generated.h"
 
-UENUM(BlueprintType)
-enum class ERootHeraldVerdict : uint8
-{
-    Allow UMETA(DisplayName = "Allow"),
-    Warn  UMETA(DisplayName = "Warn"),
-    Deny  UMETA(DisplayName = "Deny"),
-};
-
-USTRUCT(BlueprintType)
-struct FRootHeraldVerifyResult
-{
-    GENERATED_BODY()
-
-    UPROPERTY(BlueprintReadOnly, Category = "Root Herald")
-    ERootHeraldVerdict Verdict = ERootHeraldVerdict::Deny;
-
-    UPROPERTY(BlueprintReadOnly, Category = "Root Herald")
-    FString DeviceId;
-
-    UPROPERTY(BlueprintReadOnly, Category = "Root Herald")
-    FString TpmClass;
-
-    UPROPERTY(BlueprintReadOnly, Category = "Root Herald")
-    FString PostureJson;
-
-    UPROPERTY(BlueprintReadOnly, Category = "Root Herald")
-    FString Reason;
-};
-
 /**
- * Blueprint-callable Root Herald client.
+ * Blueprint-callable Root Herald client (ABI 3.0 — keyless).
  *
- * Mirrors the C ABI in src/clients/common/rootherald.h:
- *   Initialize → RootHeraldClient_Create
- *   Verify     → RootHeraldClient_Verify
+ * Mirrors the C ABI in common/rootherald.h:
+ *   Initialize       → RootHeraldClient_Create   (no key, no endpoint)
+ *   CollectEvidence  → RootHeraldClient_CollectEvidence (per-attestation blob)
+ *
+ * The client holds no RootHerald key and opens no socket to RootHerald: it emits
+ * an opaque evidence blob your game BACKEND relays to
+ * POST /api/v1/attestations/verify (authenticated with its rh_sk_). The verdict
+ * is computed and enforced server-side and never travels through the client.
  *
  * Dynamically loads RootHerald.dll / RootHeraldKit.framework / librootherald.so
  * via FPlatformProcess::GetDllHandle so the editor build is not bound to the
@@ -55,13 +31,17 @@ public:
     URootHeraldClient();
     virtual ~URootHeraldClient();
 
-    /** Load the native library and create the underlying client handle. */
+    /** Load the native library and create the underlying keyless client handle. */
     UFUNCTION(BlueprintCallable, Category = "Root Herald")
-    bool Initialize(const FString& ApiKey, const FString& Endpoint);
+    bool Initialize();
 
-    /** Synchronous verify; pair with Async Task in BP for non-blocking calls. */
+    /**
+     * Collect a per-attestation evidence blob over a backend-issued base64 nonce.
+     * Returns the evidence JSON to hand back to your backend for relay to
+     * POST /api/v1/attestations/verify, or an empty string on failure.
+     */
     UFUNCTION(BlueprintCallable, Category = "Root Herald")
-    FRootHeraldVerifyResult Verify(const FString& Action);
+    FString CollectEvidence(const FString& NonceB64);
 
     /** Library / ABI versions for diagnostic UI. */
     UFUNCTION(BlueprintCallable, Category = "Root Herald")

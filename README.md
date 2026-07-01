@@ -1,19 +1,31 @@
 # Root Herald — Native SDK
 
 Embeddable static library for hardware-rooted device attestation. You link it
-into your native app, call `Verify`, and get back a signed verdict tied to the
-device's TPM (Windows/Linux) or Secure Enclave (macOS). One C ABI, declared in
-[`common/rootherald.h`](./common/rootherald.h); all platforms implement it.
+into your native app and call `Verify` to get back a verdict tied to the
+device's TPM (Windows) or Secure Enclave (macOS). One C ABI, declared in
+[`common/rootherald.h`](./common/rootherald.h); all platforms expose it, but
+not all platforms have a working `Verify` yet — see the status column.
 
 ## Platforms
 
 | Platform | Language | Hardware path | Artifact | Status |
 |---|---|---|---|---|
-| Windows | C++20 | NCrypt PCP + raw TBS | `RootHerald.lib` | GA |
-| Linux | C11 | tpm2-tss ESAPI | `librootherald.a` | Beta |
-| macOS | Obj-C | Secure Enclave | `librootherald.a` | Beta |
+| Windows | C++20 | NCrypt PCP + raw TBS | `RootHerald.lib` | Working (dogfooded on this developer's hardware against the real TPM; not yet third-party-validated) |
+| Linux | C11 | tpm2-tss ESAPI | `librootherald.a` | **In development — keyless verbs NOT functional** (return `ROOTHERALD_ERR_INTERNAL`; the tpm2-tss collectors are not wired up) |
+| macOS | Obj-C | Secure Enclave | `librootherald.a` | **In development — keyless verbs NOT functional** (Secure Enclave collectors not wired up) |
 | Android | Kotlin | Hardware Key Attestation | AAR | Deferred |
 | iOS | Swift | App Attest | Swift Package | Deferred |
+
+> **Keyless client (ABI 3.0).** The client holds no RootHerald key and opens no
+> socket to RootHerald: it does local TPM work and emits opaque blobs your
+> backend relays (`EnrollBegin`/`EnrollComplete` → `/devices/enroll`+`/activate`;
+> `CollectEvidence` → `/attestations/verify`). The verdict is computed and
+> enforced server-side and never travels through the client.
+>
+> **What works today.** Only the **Windows** keyless verbs perform real TPM work
+> (and only as developer-dogfooded — not yet validated by an external
+> integrator). On **Linux** and **macOS** they return `ROOTHERALD_ERR_INTERNAL`
+> ("not yet implemented") until the per-platform collectors land.
 
 ## Layout
 
@@ -58,18 +70,28 @@ For CI/build agents without TPM hardware, Linux and macOS accept
 ## Use
 
 The SDK links into your binary; there is no runtime DLL/SO/dylib dependency on
-us and no daemon to install. Include the one public header and call `Verify`:
+us and no daemon to install. Include the one public header; the client is keyless
+and hands you opaque blobs your backend relays to RootHerald:
 
 ```c
 #include <rootherald.h>
 
-RootHeraldClient* c = RootHeraldClient_Create("rh_pk_live_...", NULL);
-RootHeraldVerifyResult r;
-if (RootHeraldClient_Verify(c, "game-launch", &r) == ROOTHERALD_OK) {
-    /* r.verdict (ALLOW/WARN/DENY), r.device_id, r.tpm_class, r.reason */
+RootHeraldClient* c = RootHeraldClient_Create();   /* no key, no endpoint */
+
+/* Per-attestation: a fresh quote over a backend-issued nonce. */
+char* evidence = NULL;
+if (RootHeraldClient_CollectEvidence(nonce_b64, &evidence) == ROOTHERALD_OK) {
+    send_to_my_backend(evidence);   /* backend relays to /attestations/verify */
+    RootHeraldClient_FreeEvidence(evidence);
 }
 RootHeraldClient_Destroy(c);
 ```
+
+Enrollment is the two-leg keyless handshake `RootHeraldClient_EnrollBegin` →
+(backend relays) → `RootHeraldClient_EnrollComplete`; see
+[INTEGRATING.md](./INTEGRATING.md). This works on **Windows** today. On **Linux**
+and **macOS** these calls currently return `ROOTHERALD_ERR_INTERNAL` ("not yet
+implemented") — see the platform status table above before integrating.
 
 Runnable copies live under [`samples/minimal/`](./samples/). For linking,
 ABI/threading/memory contracts, and per-platform notes, see

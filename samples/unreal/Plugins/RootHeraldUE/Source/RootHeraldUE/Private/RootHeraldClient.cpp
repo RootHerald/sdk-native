@@ -10,42 +10,30 @@
 #endif
 
 // ---------------------------------------------------------------------------
-// Mirror of the public C ABI from src/clients/common/rootherald.h. We declare
-// the function-pointer types locally instead of #including the header so the
-// plugin compiles without the header on the include path.
+// Mirror of the public C ABI from common/rootherald.h (ABI 3.0 — keyless). We
+// declare the function-pointer types locally instead of #including the header so
+// the plugin compiles without the header on the include path.
 // ---------------------------------------------------------------------------
 
 extern "C"
 {
     typedef struct RootHeraldClient RootHeraldClient_t;
     typedef enum {
-        RH_PROTO_OK = 0,
+        ROOTHERALD_OK = 0,
         ROOTHERALD_ERR_INVALID_ARG = 1,
         ROOTHERALD_ERR_TPM_UNAVAILABLE = 2,
-        RH_PROTO_ERR_NETWORK = 3,
+        ROOTHERALD_ERR_NETWORK = 3,
         ROOTHERALD_ERR_SERVER = 4,
         ROOTHERALD_ERR_QUOTA_EXCEEDED = 5,
-        RH_PROTO_ERR_INTERNAL = 99
+        ROOTHERALD_ERR_NOT_ENROLLED = 6,
+        ROOTHERALD_ERR_ELEVATION_REQUIRED = 7,
+        ROOTHERALD_ERR_INTERNAL = 99
     } RootHeraldStatus_t;
 
-    typedef enum {
-        ROOTHERALD_VERDICT_ALLOW = 0,
-        ROOTHERALD_VERDICT_WARN = 1,
-        ROOTHERALD_VERDICT_DENY = 2
-    } RootHeraldVerdict_t;
-
-    struct RootHeraldVerifyResult_t
-    {
-        RootHeraldVerdict_t Verdict;
-        char DeviceId[129];
-        char TpmClass[64];
-        char PostureJson[1024];
-        char Reason[256];
-    };
-
-    typedef RootHeraldClient_t* (*Pfn_Create)(const char*, const char*);
+    typedef RootHeraldClient_t* (*Pfn_Create)(void);
     typedef void                (*Pfn_Destroy)(RootHeraldClient_t*);
-    typedef RootHeraldStatus_t  (*Pfn_Verify)(RootHeraldClient_t*, const char*, RootHeraldVerifyResult_t*);
+    typedef RootHeraldStatus_t  (*Pfn_Collect)(const char*, char**);
+    typedef void                (*Pfn_Free)(char*);
     typedef const char*         (*Pfn_AbiVer)(void);
     typedef const char*         (*Pfn_LibVer)(void);
 }
@@ -54,7 +42,8 @@ void* URootHeraldClient::DllHandle = nullptr;
 
 static Pfn_Create  GCreate  = nullptr;
 static Pfn_Destroy GDestroy = nullptr;
-static Pfn_Verify  GVerify  = nullptr;
+static Pfn_Collect GCollect = nullptr;
+static Pfn_Free    GFree    = nullptr;
 static Pfn_AbiVer  GAbiVer  = nullptr;
 static Pfn_LibVer  GLibVer  = nullptr;
 
@@ -83,10 +72,11 @@ bool URootHeraldClient::EnsureDllLoaded()
 
     GCreate  = (Pfn_Create) FPlatformProcess::GetDllExport(DllHandle, TEXT("RootHeraldClient_Create"));
     GDestroy = (Pfn_Destroy)FPlatformProcess::GetDllExport(DllHandle, TEXT("RootHeraldClient_Destroy"));
-    GVerify  = (Pfn_Verify) FPlatformProcess::GetDllExport(DllHandle, TEXT("RootHeraldClient_Verify"));
+    GCollect = (Pfn_Collect)FPlatformProcess::GetDllExport(DllHandle, TEXT("RootHeraldClient_CollectEvidence"));
+    GFree    = (Pfn_Free)   FPlatformProcess::GetDllExport(DllHandle, TEXT("RootHeraldClient_FreeEvidence"));
     GAbiVer  = (Pfn_AbiVer) FPlatformProcess::GetDllExport(DllHandle, TEXT("RootHerald_AbiVersionString"));
     GLibVer  = (Pfn_LibVer) FPlatformProcess::GetDllExport(DllHandle, TEXT("RootHerald_LibraryVersionString"));
-    return GCreate && GDestroy && GVerify;
+    return GCreate && GDestroy && GCollect && GFree;
 }
 
 URootHeraldClient::URootHeraldClient() {}
@@ -99,37 +89,30 @@ URootHeraldClient::~URootHeraldClient()
     }
 }
 
-bool URootHeraldClient::Initialize(const FString& ApiKey, const FString& Endpoint)
+bool URootHeraldClient::Initialize()
 {
     if (!EnsureDllLoaded()) return false;
-    auto KeyUtf8 = StringCast<ANSICHAR>(*ApiKey);
-    auto EpUtf8  = StringCast<ANSICHAR>(*Endpoint);
-    NativeHandle = GCreate(KeyUtf8.Get(), EpUtf8.Get());
+    NativeHandle = GCreate();
     return NativeHandle != nullptr;
 }
 
-FRootHeraldVerifyResult URootHeraldClient::Verify(const FString& Action)
+FString URootHeraldClient::CollectEvidence(const FString& NonceB64)
 {
-    FRootHeraldVerifyResult Out;
-    if (!NativeHandle || !GVerify)
+    if (!EnsureDllLoaded() || !GCollect || !GFree)
     {
-        Out.Reason = TEXT("Root Herald not initialized");
-        return Out;
+        return FString();
     }
-    RootHeraldVerifyResult_t Native = {};
-    auto ActionUtf8 = StringCast<ANSICHAR>(*Action);
-    RootHeraldStatus_t Status = GVerify(
-        reinterpret_cast<RootHeraldClient_t*>(NativeHandle),
-        ActionUtf8.Get(),
-        &Native);
-
-    Out.Verdict = static_cast<ERootHeraldVerdict>(Native.Verdict);
-    Out.DeviceId = FString(ANSI_TO_TCHAR(Native.DeviceId));
-    Out.TpmClass = FString(ANSI_TO_TCHAR(Native.TpmClass));
-    Out.PostureJson = FString(ANSI_TO_TCHAR(Native.PostureJson));
-    Out.Reason = (Status == RH_PROTO_OK)
-        ? FString(ANSI_TO_TCHAR(Native.Reason))
-        : FString::Printf(TEXT("verify failed (%d)"), (int32)Status);
+    auto NonceUtf8 = StringCast<ANSICHAR>(*NonceB64);
+    char* Blob = nullptr;
+    // CollectEvidence is handle-less (keyless): it takes only the nonce.
+    RootHeraldStatus_t Status = GCollect(NonceUtf8.Get(), &Blob);
+    if (Status != ROOTHERALD_OK || Blob == nullptr)
+    {
+        if (Blob) GFree(Blob);
+        return FString();
+    }
+    FString Out = FString(ANSI_TO_TCHAR(Blob));
+    GFree(Blob);
     return Out;
 }
 
