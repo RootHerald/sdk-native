@@ -54,8 +54,9 @@
 // the canonical 0x81010001 to avoid colliding with vendor tooling.
 static const uint32_t kTbsAkPersistentHandle = 0x81029301u;
 
-// Global link token / device ID, set by the tray app before RootHeraldAttest.
-static std::string g_linkToken;
+// Global device ID override, optionally set by the host before evidence
+// collection to bind a user-owned device. When empty, CollectEvidenceFields
+// derives the deviceId from the EK (see DeriveLocalDeviceId).
 static std::string g_deviceId;
 
 // ===========================================================================
@@ -382,149 +383,37 @@ static std::map<std::string, std::string> BuildEnrollFields(
     return fields;
 }
 
-enum class EnrollOutcome {
-    Ok,             // fully enrolled + activated
-    ActivateFailed, // server enroll OK but activation rejected (try other backend)
-    EnrollFailed    // EK/AK setup or server/network failure (do not fall back)
-};
-
-// The single shared enrollment flow, parameterised by the AK backend.
-// Identical for first enroll and key rotation, PCP or TBS.
-static EnrollOutcome RunEnrollFlow(const char* server_url,
-                                   RootHerald::IAttestationKeyProvider& provider,
-                                   std::string& outDeviceId)
-{
-    // Raw-TBS TPM2_ActivateCredential requires an elevated process. Guard before
-    // the server round-trip so we never strand a half-enrolled device; the caller
-    // reaches RunEnrollFlow only after arranging elevation (in-process or via the
-    // elevated --establish-key child).
-    if (!IsProcessElevated()) {
-        RH_LOG_WARN("[enroll:%s] activation needs elevation; process is not elevated\n",
-                provider.ModeName());
-        return EnrollOutcome::ActivateFailed;
-    }
-
-    EkEnrollData ek;
-    if (!GatherEkEnrollData(ek)) return EnrollOutcome::EnrollFailed;
-
-    if (!provider.Open()) {
-        RH_LOG_WARN("[enroll:%s] provider open failed\n", provider.ModeName());
-        return EnrollOutcome::EnrollFailed;
-    }
-    if (!provider.CreateAk()) {
-        RH_LOG_WARN("[enroll:%s] CreateAk failed\n", provider.ModeName());
-        return EnrollOutcome::EnrollFailed;
-    }
-    auto akPub = provider.GetAkPublicArea();
-    if (akPub.empty()) {
-        RH_LOG_WARN("[enroll:%s] GetAkPublicArea failed\n", provider.ModeName());
-        provider.DeleteAk();
-        return EnrollOutcome::EnrollFailed;
-    }
-    RH_LOG_WARN("[enroll:%s] AK created, pub area %zu bytes\n", provider.ModeName(), akPub.size());
-
-    // POST /enroll. Built via the shared assembler.
-    std::map<std::string, std::string> fields = BuildEnrollFields(ek, akPub);
-    std::string url = std::string(server_url) + "/api/v1/devices/enroll";
-    auto resp = RootHerald::HttpPost(url, RootHerald::JsonBuild(fields));
-    RH_LOG_WARN("[enroll:%s] enroll response: %d\n", provider.ModeName(), resp.statusCode);
-
-    if (resp.statusCode == 409) {
-        auto did = RootHerald::JsonGet(resp.body, "deviceId");
-        if (!did.empty()) { outDeviceId = did; return EnrollOutcome::Ok; }
-    }
-    if (resp.statusCode != 201) { provider.DeleteAk(); return EnrollOutcome::EnrollFailed; }
-
-    auto deviceId  = RootHerald::JsonGet(resp.body, "deviceId");
-    auto credBlob  = RootHerald::JsonGet(resp.body, "credentialBlob");
-    auto encSecret = RootHerald::JsonGet(resp.body, "encryptedSecret");
-    if (deviceId.empty() || credBlob.empty() || encSecret.empty()) {
-        provider.DeleteAk();
-        return EnrollOutcome::EnrollFailed;
-    }
-
-    // Credential activation — the mode-defining step.
-    auto secret = provider.ActivateCredential(Base64Decode(credBlob), Base64Decode(encSecret));
-    if (secret.empty()) {
-        RH_LOG_WARN("[enroll:%s] ActivateCredential failed\n", provider.ModeName());
-        provider.DeleteAk();
-        return EnrollOutcome::ActivateFailed;
-    }
-    RH_LOG_WARN("[enroll:%s] ActivateCredential OK (%zu bytes)\n", provider.ModeName(), secret.size());
-
-    // POST /activate
-    std::string activateBody = RootHerald::JsonBuild({
-        {"deviceId",        deviceId},
-        {"decryptedSecret", Base64Encode(secret.data(), secret.size())}
-    });
-    auto actResp = RootHerald::HttpPost(std::string(server_url) + "/api/v1/devices/activate", activateBody);
-    if (actResp.statusCode != 200) {
-        RH_LOG_WARN("[enroll:%s] activate POST failed: %d\n", provider.ModeName(), actResp.statusCode);
-        provider.DeleteAk();
-        return EnrollOutcome::EnrollFailed;
-    }
-
-    if (!provider.PersistAk()) {
-        RH_LOG_WARN("[enroll:%s] PersistAk failed\n", provider.ModeName());
-        return EnrollOutcome::EnrollFailed;
-    }
-
-    outDeviceId = deviceId;
-    RH_LOG_WARN("[enroll:%s] complete (deviceId=%s)\n", provider.ModeName(), deviceId.c_str());
-    return EnrollOutcome::Ok;
-}
-
 // ===========================================================================
-// Elevated TBS fallback: spawn self elevated; the child runs the TBS flow.
-// ===========================================================================
-
-// Entry point for the elevated child (already running elevated). Runs the TBS
-// enrollment and writes the resulting deviceId to result_path for the parent.
-// Returns 0 on success.
-extern "C" ROOTHERALD_API int RootHeraldRunElevatedEstablishKey(
-    const char* server_url, const char* result_path)
-{
-    if (!server_url) return 1;
-
-    // This is the elevated worker; the parent reaches it via a "runas" spawn.
-    // It is also a public entry (native_host / test_client route --establish-key
-    // here), so assert elevation explicitly: raw-TBS TPM2_ActivateCredential is
-    // rejected for unprivileged callers with TPM_E_COMMAND_BLOCKED. Fail clearly
-    // instead. The elevation *attempt* lives in the public RootHeraldEnroll
-    // path, not in this already-spawned worker.
-    if (!IsProcessElevated()) {
-        RH_LOG_WARN("[establish-key] must run elevated; refusing raw-TBS activation\n");
-        return 1;
-    }
-
-    RootHerald::TbsKeyProvider tbs(kTbsAkPersistentHandle);
-    std::string deviceId;
-    auto outcome = RunEnrollFlow(server_url, tbs, deviceId);
-    if (outcome != EnrollOutcome::Ok) {
-        RH_LOG_WARN("[establish-key] TBS enrollment failed (outcome=%d)\n", (int)outcome);
-        return 1;
-    }
-    if (result_path && *result_path) {
-        FILE* f = nullptr;
-        if (fopen_s(&f, result_path, "wb") == 0 && f) {
-            fwrite(deviceId.c_str(), 1, deviceId.size(), f);
-            fclose(f);
-        }
-    }
-    return 0;
-}
-
-// ===========================================================================
-// Public API: enroll (elevated-TBS; elevation is the CALLER's responsibility),
-// attest, status.
+// Keyless, backend-relayed enrollment (ABI 3.0): EnrollBegin / EnrollComplete.
 //
-// The SDK deliberately does NOT acquire elevation itself (no ShellExecute/runas,
-// no service install). Enrollment's TPM2_ActivateCredential requires an elevated
-// process; when the caller is unprivileged, RootHeraldEnroll reports
-// RH_PROTO_ERR_ELEVATION_REQUIRED and the caller chooses an elevation strategy
-// (its own escalation shim, our host binary, an existing privileged service, or
-// simply skipping enrollment). Once elevated, the caller drives enrollment via
-// RootHeraldRunElevatedEstablishKey (or by calling this while already elevated).
+// The enroll ceremony is irreducibly two server round-trips with a TPM op
+// between them:
+//   1. EnrollBegin  — gather EK pub + EK cert chain + create an AK (raw-TBS,
+//                     elevated) -> emit the verbatim POST /devices/enroll body.
+//   2. [backend relays it; RootHerald validates the EK chain + AkTemplate,
+//      MakeCredential-seals a secret to the EK, returns the challenge.]
+//   3. EnrollComplete(challenge) — TPM2_ActivateCredential decrypts the secret
+//                     -> emit the verbatim POST /devices/activate body.
+//   4. [backend relays it; RootHerald constant-time compares + Name-match
+//      guards -> enrolled.]
+//
+// These two halves make NO network call and consult NO key — the embedder's
+// BACKEND relays the bytes (WP4 Option A). This only moves the network boundary:
+// the server-side EK-chain validation, AkTemplateValidator (closes the
+// software-AK spoof), MakeCredential sealing, constant-time secret compare, and
+// activate Name-match guard ALL still run on the relayed bytes, byte-for-byte —
+// it weakens nothing.
+//
+// SINGLE ELEVATION SPANS BEGIN -> COMPLETE. Raw-TBS AK creation (begin) and
+// TPM2_ActivateCredential (complete) both require an elevated process. Crucially,
+// TbsKeyProvider::ActivateCredential needs the *transient* EK+AK handles that
+// CreateAk established in begin (LoadAk over the persistent handle does NOT
+// restore them) — so the provider, with its open TBS context, is held resident
+// in this process across the relayed round-trip via g_enrollProvider. The
+// embedder must therefore keep the SAME (elevated) process alive from EnrollBegin
+// through EnrollComplete (e.g. an elevated worker that emits the begin blob over
+// IPC, waits for the relayed challenge, then calls complete). This is the
+// keyless relay shape ABI 1.4 had, now on the TBS/single-elevation base (no PCP).
 // ===========================================================================
 
 // True if the device already has a persisted AK. The persistent-handle AK
@@ -536,35 +425,121 @@ static bool AnyAkPresent()
     return tbs.Open() && tbs.AkExists();
 }
 
-RootHeraldResult RootHeraldEnroll(
-    const char* server_url,
-    int force_reenroll,
-    RootHeraldEnrollmentInfo* out_info)
-{
-    if (!server_url || !out_info)
-        return RH_PROTO_ERR_INVALID_PARAM;
-    memset(out_info, 0, sizeof(RootHeraldEnrollmentInfo));
+// In-flight enrollment state held BETWEEN EnrollBegin and EnrollComplete within a
+// single (elevated) process. Holds the open TBS context + transient EK/AK handles
+// that ActivateCredential requires; must outlive the relayed network round-trip.
+static std::unique_ptr<RootHerald::TbsKeyProvider> g_enrollProvider;
 
-    // Already enrolled (and not rotating): bail.
-    if (!force_reenroll && AnyAkPresent()) {
-        RH_LOG_WARN("[enroll] already enrolled; use force_reenroll=1 to rotate\n");
-        return RH_PROTO_ERR_ALREADY_ENROLLED;
+// Begin enrollment (keyless): gather EK + create an AK under elevation; emit the
+// /devices/enroll request body. Caller owns the buffer; free it with
+// RootHeraldFreeEvidence. Holds the provider open for the matching EnrollComplete.
+extern "C" ROOTHERALD_API RootHeraldResult RootHeraldEnrollBegin(
+    char** out_enroll_json)
+{
+    if (!out_enroll_json) return RH_PROTO_ERR_INVALID_PARAM;
+    *out_enroll_json = nullptr;
+
+    // Raw-TBS AK creation here, and TPM2_ActivateCredential in EnrollComplete,
+    // both require elevation (TPM_E_COMMAND_BLOCKED otherwise). Report it; the
+    // host arranges elevation AND keeps this process resident across the relay.
+    if (!IsProcessElevated()) {
+        RH_LOG_WARN("[enroll-begin] not elevated; raw-TBS activation will be blocked\n");
+        return RH_PROTO_ERR_ELEVATION_REQUIRED;
     }
 
-    // Raw-TBS enrollment requires an elevated process (TPM2_ActivateCredential).
-    // If we're not elevated, REPORT that and let the caller decide how to
-    // elevate — the SDK never spawns a UAC on its own. An already-elevated caller
-    // (admin shell, the caller's escalation shim, or a privileged service that
-    // routed here via RootHeraldRunElevatedEstablishKey) runs in-process; the AK
-    // is evicted to a persistent handle so every later attestation is unprivileged.
-    if (!IsProcessElevated())
-        return RH_PROTO_ERR_ELEVATION_REQUIRED;
-
-    std::string deviceId;
-    RootHerald::TbsKeyProvider tbs(kTbsAkPersistentHandle);
-    if (RunEnrollFlow(server_url, tbs, deviceId) != EnrollOutcome::Ok)
+    EkEnrollData ek;
+    if (!GatherEkEnrollData(ek)) {
+        RH_LOG_WARN("[enroll-begin] EK gather failed\n");
         return RH_PROTO_ERR_ENROLLMENT_FAILED;
-    strncpy_s(out_info->device_id, deviceId.c_str(), _TRUNCATE);
+    }
+
+    auto provider = std::make_unique<RootHerald::TbsKeyProvider>(kTbsAkPersistentHandle);
+    if (!provider->Open()) {
+        RH_LOG_WARN("[enroll-begin] provider open failed\n");
+        return RH_PROTO_ERR_ENROLLMENT_FAILED;
+    }
+    if (!provider->CreateAk()) {
+        RH_LOG_WARN("[enroll-begin] CreateAk failed\n");
+        return RH_PROTO_ERR_ENROLLMENT_FAILED;
+    }
+    auto akPub = provider->GetAkPublicArea();
+    if (akPub.empty()) {
+        RH_LOG_WARN("[enroll-begin] GetAkPublicArea failed\n");
+        provider->DeleteAk();
+        return RH_PROTO_ERR_ENROLLMENT_FAILED;
+    }
+    RH_LOG_WARN("[enroll-begin] AK created, pub area %zu bytes\n", akPub.size());
+
+    // Byte-identical to the (removed) direct path's enroll body, via the shared
+    // assembler — the server's EK validation + AkTemplateValidator + MakeCredential
+    // run on these exact bytes.
+    std::string json = RootHerald::JsonBuild(BuildEnrollFields(ek, akPub));
+    char* buf = (char*)malloc(json.size() + 1);
+    if (!buf) { provider->DeleteAk(); return RH_PROTO_ERR_INTERNAL; }
+    memcpy(buf, json.c_str(), json.size() + 1);
+    *out_enroll_json = buf;
+
+    // Hold the provider (open context + transient EK/AK) for EnrollComplete.
+    g_enrollProvider = std::move(provider);
+    return RH_PROTO_OK;
+}
+
+// Complete enrollment (keyless): TPM2_ActivateCredential over the server's
+// MakeCredential challenge; emit the /devices/activate request body, persist the
+// activated AK. Caller owns the buffer; free it with RootHeraldFreeEvidence.
+extern "C" ROOTHERALD_API RootHeraldResult RootHeraldEnrollComplete(
+    const char* challenge_json, char** out_activate_json)
+{
+    if (!challenge_json || !out_activate_json) return RH_PROTO_ERR_INVALID_PARAM;
+    *out_activate_json = nullptr;
+
+    if (!g_enrollProvider) {
+        RH_LOG_WARN("[enroll-complete] no in-flight enrollment — call EnrollBegin "
+                    "first in THIS (resident, elevated) process\n");
+        return RH_PROTO_ERR_NOT_ENROLLED;
+    }
+
+    std::string challenge(challenge_json);
+    auto deviceId  = RootHerald::JsonGet(challenge, "deviceId");
+    auto credBlob  = RootHerald::JsonGet(challenge, "credentialBlob");
+    auto encSecret = RootHerald::JsonGet(challenge, "encryptedSecret");
+    if (deviceId.empty() || credBlob.empty() || encSecret.empty()) {
+        RH_LOG_WARN("[enroll-complete] challenge missing deviceId/credentialBlob/encryptedSecret\n");
+        return RH_PROTO_ERR_INVALID_PARAM;
+    }
+
+    // The mode-defining TPM op, against the transient AK+EK from EnrollBegin.
+    auto secret = g_enrollProvider->ActivateCredential(
+        Base64Decode(credBlob), Base64Decode(encSecret));
+    if (secret.empty()) {
+        RH_LOG_WARN("[enroll-complete] ActivateCredential failed\n");
+        g_enrollProvider->DeleteAk();
+        g_enrollProvider.reset();
+        return RH_PROTO_ERR_ATTESTATION_FAILED;
+    }
+    RH_LOG_WARN("[enroll-complete] ActivateCredential OK (%zu bytes)\n", secret.size());
+
+    // Activation proved; evict the AK to the persistent handle so later
+    // (unprivileged) attestation can Quote against it.
+    if (!g_enrollProvider->PersistAk()) {
+        RH_LOG_WARN("[enroll-complete] PersistAk failed\n");
+        g_enrollProvider.reset();
+        return RH_PROTO_ERR_ENROLLMENT_FAILED;
+    }
+    g_enrollProvider.reset();
+
+    // Exact POST /api/v1/devices/activate body. The genuine client sends NO
+    // akPublicKey here (only the decrypted secret) — the server verifies against
+    // the AK Name MakeCredential already bound at enroll.
+    std::string json = RootHerald::JsonBuild({
+        {"deviceId",        deviceId},
+        {"decryptedSecret", Base64Encode(secret.data(), secret.size())}
+    });
+    char* buf = (char*)malloc(json.size() + 1);
+    if (!buf) return RH_PROTO_ERR_INTERNAL;
+    memcpy(buf, json.c_str(), json.size() + 1);
+    *out_activate_json = buf;
+    RH_LOG_WARN("[enroll-complete] complete (deviceId=%s)\n", deviceId.c_str());
     return RH_PROTO_OK;
 }
 
@@ -749,85 +724,18 @@ static RootHeraldResult CollectEvidenceFields(
     return RH_PROTO_OK;
 }
 
-// Passport / badge-tier fallback (RATS Passport model): the device collects
-// evidence AND POSTs it directly to RootHerald with the tenant's publishable
-// site key (installed by the ScopedSiteKey facade). Kept for the backend-less
-// badge tier, which cannot hold an rh_sk_ secret key. The dumb-client
-// Background-Check path (RootHeraldCollectEvidence) returns the same evidence
-// to the embedder WITHOUT this POST and WITHOUT any key.
-RootHeraldResult RootHeraldAttest(
-    const char* server_url,
-    const char* session_id,
-    const char* nonce_b64,
-    size_t /*nonce_len*/,
-    RootHeraldAttestationInfo* out_info)
-{
-    if (!server_url || !session_id || !nonce_b64 || !out_info)
-        return RH_PROTO_ERR_INVALID_PARAM;
-    memset(out_info, 0, sizeof(RootHeraldAttestationInfo));
-
-    // Collect the evidence (no key, no network) via the shared collector.
-    std::map<std::string, std::string> bodyFields;
-    std::string reason;
-    RootHeraldResult collect = CollectEvidenceFields(nonce_b64, bodyFields, reason);
-    if (collect != RH_PROTO_OK) {
-        strncpy_s(out_info->session_id, session_id, _TRUNCATE);
-        strncpy_s(out_info->status, "failed", _TRUNCATE);
-        strncpy_s(out_info->failure_reason,
-                  reason.empty() ? "evidence collection failed" : reason.c_str(),
-                  _TRUNCATE);
-        // NO_TPM is surfaced as its own code, mirroring the prior behaviour.
-        return collect;
-    }
-
-    // Passport-only fields: bind the evidence to the server-created session and
-    // (optionally) consume a one-shot link token. These are NOT part of the
-    // dumb-client Background-Check evidence — that path's freshness comes from
-    // the customer's relayed challenge nonce instead of a RootHerald session.
-    bodyFields["sessionId"] = session_id;
-    if (!g_linkToken.empty()) { bodyFields["linkToken"] = g_linkToken; g_linkToken.clear(); }
-
-    // POST /attest (Passport direct path; carries X-RootHerald-Site-Key when the
-    // facade installed one).
-    auto resp = RootHerald::HttpPost(std::string(server_url) + "/api/v1/attest",
-                                     RootHerald::JsonBuild(bodyFields));
-    RH_LOG_WARN("[attest] Response: %d, body: %.300s\n", resp.statusCode, resp.body.c_str());
-    if (resp.statusCode != 200) {
-        // Surface the server's machine-readable error code (e.g.
-        // "session_unbound") so callers can branch on it — the prose
-        // error_description is for humans and may change.
-        auto errCode = RootHerald::JsonGet(resp.body, "error");
-        strncpy_s(out_info->session_id, session_id, _TRUNCATE);
-        strncpy_s(out_info->status, "failed", _TRUNCATE);
-        strncpy_s(out_info->failure_reason,
-                  !errCode.empty() ? errCode.c_str() : "server rejected attestation",
-                  _TRUNCATE);
-        return RH_PROTO_ERR_ATTESTATION_FAILED;
-    }
-
-    // 7. Parse response.
-    auto status = RootHerald::JsonGet(resp.body, "status");
-    strncpy_s(out_info->session_id, session_id, _TRUNCATE);
-    strncpy_s(out_info->status, status.c_str(), _TRUNCATE);
-    strncpy_s(out_info->authorization_code, RootHerald::JsonGet(resp.body, "authorizationCode").c_str(), _TRUNCATE);
-    strncpy_s(out_info->redirect_uri, RootHerald::JsonGet(resp.body, "redirectUri").c_str(), _TRUNCATE);
-    strncpy_s(out_info->failure_reason, RootHerald::JsonGet(resp.body, "reason").c_str(), _TRUNCATE);
-    return status == "verified" ? RH_PROTO_OK : RH_PROTO_ERR_ATTESTATION_FAILED;
-}
-
 // ===========================================================================
-// Dumb-client collect-only entry (Background-Check WP6, contract C5).
+// Per-attestation collect-only entry (keyless).
 //
-// Backs the public RootHeraldClient_CollectEvidence. Collects the SAME
-// self-contained evidence blob the Passport collector assembles before its
-// POST (quote over the caller's nonce, EK pub cert + chain, PCRs, event log,
-// secure-boot chain — minus the Passport-only sessionId/linkToken) and returns
-// it as a heap-allocated JSON string to the embedder, who hands it to the
-// CUSTOMER's server for relay to POST /api/v1/attestations/verify.
+// Backs the public RootHeraldClient_CollectEvidence. Collects the self-contained
+// evidence blob (quote over the caller's nonce, EK pub cert + chain, PCRs, event
+// log, secure-boot chain) and returns it as a heap-allocated JSON string to the
+// embedder, who hands it to the CUSTOMER's server for relay to
+// POST /api/v1/attestations/verify.
 //
-// NO network call. NO API/site key required (the legacy global path has never
-// owned a key, and CollectEvidenceFields installs none). The returned buffer is
-// caller-owned; free it with RootHeraldFreeEvidence.
+// NO network call. NO key required. The returned buffer is caller-owned; free it
+// with RootHeraldFreeEvidence. (The earlier Passport direct-POST RootHeraldAttest
+// was removed in ABI 3.0 — the client never POSTs to RootHerald or holds a key.)
 // ===========================================================================
 extern "C" ROOTHERALD_API RootHeraldResult RootHeraldCollectEvidence(
     const char* nonce_b64, char** out_evidence_json)
@@ -856,23 +764,6 @@ extern "C" ROOTHERALD_API RootHeraldResult RootHeraldCollectEvidence(
 extern "C" ROOTHERALD_API void RootHeraldFreeEvidence(char* evidence_json)
 {
     free(evidence_json);
-}
-
-// ===========================================================================
-// (Removed) Page-driven enrollment split.
-//
-// RootHeraldEnrollCollect / RootHeraldEnrollActivate were the PCP-only,
-// unprivileged two-round-trip enroll relayed through the customer's server.
-// They are gone: enrollment now always runs under a single elevation via
-// RootHeraldEnroll (the elevated-TBS path), so the browser/host triggers that
-// one-shot elevated enroll rather than relaying TPM halves. Per-request
-// attestation (RootHeraldCollectEvidence) stays unprivileged and relay-friendly.
-// ===========================================================================
-
-void RootHeraldSetLinkToken(const char* link_token)
-{
-    if (link_token) g_linkToken = link_token;
-    else g_linkToken.clear();
 }
 
 void RootHeraldSetDeviceId(const char* device_id)

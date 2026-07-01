@@ -6,23 +6,25 @@
  * from C, C++, Rust, Go, Zig, Swift (via clang module), and P/Invoke
  * (.NET) without an intermediate shim layer.
  *
- * Transport modes (N4)
- * --------------------
- * The client distinguishes the three deployment modes purely by the URL
- * passed to RootHeraldClient_Create / RootHeraldClient_SetEndpoint:
- *   - "https://rootherald.io"            → direct
- *   - "https://attest.customer.com"      → custom domain (transparent)
- *   - "https://api.customer.com/rh-proxy" → reverse-proxy (transparent;
- *                                            the proxy forwards to us)
- *
- * The library issues identical wire traffic in all three cases. Routing
- * concerns live entirely at the endpoint operator.
+ * Keyless / backend-relayed model (ABI 3.0)
+ * -----------------------------------------
+ * The client holds NO RootHerald key and opens NO socket to RootHerald. It does
+ * local TPM work and emits/consumes opaque JSON blobs; the embedder's BACKEND
+ * (a server SDK, authenticated with its rh_sk_ secret) relays those blobs to
+ * RootHerald. The client therefore takes no endpoint and no api_key — there is
+ * nothing for it to connect to. "Where does the traffic go" is entirely the
+ * embedder's concern (its own client<->backend channel + its backend's RootHerald
+ * calls). The only network the library itself performs is best-effort fetches to
+ * TPM-vendor PKI (e.g. AMD's AIA endpoint) to complete an EK certificate chain —
+ * never a call to RootHerald.
  *
  * Memory ownership
  * ----------------
  * All RootHeraldClient* handles must be paired with RootHeraldClient_Destroy.
- * RootHeraldVerifyResult is a caller-allocated struct; the library only
- * writes into it. There are no heap allocations transferred across the ABI.
+ * Result structs (RootHeraldDeviceInfo, RootHeraldPosture) are caller-allocated;
+ * the library only writes into them. The blob-emitting calls (EnrollBegin,
+ * EnrollComplete, CollectEvidence) return a newly-allocated NUL-terminated
+ * char* the CALLER owns and MUST free with RootHeraldClient_FreeEvidence.
  *
  * Thread-safety
  * -------------
@@ -37,21 +39,61 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define ROOTHERALD_ABI_VERSION_MAJOR 2
+#define ROOTHERALD_ABI_VERSION_MAJOR 3
 #define ROOTHERALD_ABI_VERSION_MINOR 0
 
 /*
  * ABI changelog
  * -------------
+ * 3.0 — KEYLESS, BACKEND-RELAYED CLIENT. BREAKING. The client now holds NO
+ *       RootHerald key and opens NO socket to RootHerald: its entire job is local
+ *       TPM work that emits/consumes opaque blobs the embedder's backend relays.
+ *       Changes:
+ *         * REMOVED RootHeraldClient_Verify, RootHeraldClient_AttestSession,
+ *           RootHeraldClient_SetLinkToken (the client-gets-a-verdict / OIDC
+ *           authorization-code surface). A verdict is only a security control
+ *           when enforced SERVER-side (needs rh_sk_, needs a customer backend),
+ *           so it never travels through the client. Account binding = the backend
+ *           maps a verified deviceId to its user. With them go the
+ *           RootHeraldVerdict enum and the RootHeraldVerifyResult /
+ *           RootHeraldAttestResult / RootHeraldEnrollResult structs.
+ *         * REMOVED the direct-POST RootHeraldClient_Enroll. Enrollment is now a
+ *           keyless two-leg, blob-emitting handshake:
+ *             RootHeraldClient_EnrollBegin(client, &request_json)      — gen AK +
+ *               gather EK pub/cert under a SINGLE elevation (raw-TBS), emit the
+ *               /devices/enroll request body. No network, no key.
+ *             RootHeraldClient_EnrollComplete(client, challenge_json,
+ *               &activation_json) — TPM2_ActivateCredential over the server's
+ *               MakeCredential challenge, emit the /devices/activate request body.
+ *               No network, no key.
+ *           The customer's backend relays the two legs (POST /devices/enroll then
+ *           /devices/activate, authenticated with its rh_sk_). The single
+ *           elevation SPANS begin -> complete: the elevated worker stays resident
+ *           across the relayed round-trip so the transient EK+AK handle context
+ *           that ActivateCredential needs survives. Both buffers are caller-owned
+ *           and freed with RootHeraldClient_FreeEvidence.
+ *         * REMOVED RootHeraldClient_SetEndpoint and the api_key/endpoint
+ *           parameters of RootHeraldClient_Create (now RootHeraldClient_Create()):
+ *           the client opens no RootHerald socket, so it has no endpoint and no
+ *           key to carry.
+ *         * REMOVED RootHerald_RunElevatedEstablishKey. Its POST-bearing
+ *           "elevated child enrolls and writes deviceId" contract is replaced by
+ *           the keyless EnrollBegin/EnrollComplete pair (which require elevation
+ *           for the TPM ops). The elevated worker that pumps those two calls
+ *           across the relay is the embedder's/host's responsibility.
+ *       KEPT, UNCHANGED: RootHeraldClient_CollectEvidence (per-attestation, keyless
+ *       quote-over-nonce), RootHeraldClient_CollectPosture (local readiness),
+ *       RootHeraldClient_GetDeviceInfo (local), RootHeraldClient_FreeEvidence,
+ *       handle lifecycle, mock mode, logging.
  * 2.0 — REMOVED RootHeraldClient_EnrollCollect + RootHeraldClient_EnrollActivate
- *       (the 1.4 PCP-only page-driven enroll split). BREAKING. Enrollment now
- *       runs under a single elevation via RootHeraldClient_Enroll (elevated-TBS):
- *       the host/embedder triggers that one-shot elevated ceremony rather than
+ *       (the 1.4 PCP-only page-driven enroll split). BREAKING. Enrollment ran
+ *       under a single elevation via RootHeraldClient_Enroll (elevated-TBS):
+ *       the host/embedder triggered that one-shot elevated ceremony rather than
  *       relaying TPM halves through the customer server. Removed once raw-TBS
  *       credential activation was proven to succeed under elevation, making the
  *       PCP (SHA-1-AIK) backend — whose only value was dodging the UAC —
- *       unnecessary. RootHeraldClient_CollectEvidence (per-request attestation)
- *       and RootHeraldClient_Enroll are unchanged.
+ *       unnecessary. (3.0 re-introduces the keyless relayed shape on this TBS
+ *       single-elevation base, NOT on PCP.)
  * 1.4 — ADDED RootHeraldClient_EnrollCollect + RootHeraldClient_EnrollActivate
  *       (Background-Check page-driven enrollment, contract C-enroll). Additive
  *       only; every 1.3 symbol is unchanged. These are the TPM-only halves of
@@ -117,46 +159,24 @@ typedef enum {
     ROOTHERALD_ERR_NOT_ENROLLED = 6,
     /*
      * Enrollment requires an elevated (administrator) process, but the current
-     * process is not elevated. The SDK does NOT elevate on your behalf — it
-     * reports this so YOU can choose an elevation strategy. Recover by obtaining
-     * an elevated context (your own escalation shim, our host binary, an existing
-     * privileged service) and calling RootHerald_RunElevatedEstablishKey there,
-     * then retry. Windows-only; see INTEGRATING.md ("Windows elevation").
+     * process is not elevated. Returned by RootHeraldClient_EnrollBegin /
+     * _EnrollComplete. The SDK does NOT elevate on your behalf — it reports this
+     * so YOU can choose an elevation strategy. Recover by running EnrollBegin /
+     * EnrollComplete in an elevated, resident worker (the single elevation must
+     * span both calls), then retry. Windows-only; see INTEGRATING.md ("Windows
+     * elevation").
      */
     ROOTHERALD_ERR_ELEVATION_REQUIRED = 7,
     ROOTHERALD_ERR_INTERNAL = 99
 } RootHeraldStatus;
 
-/* High-level verdict returned by Verify(). */
-typedef enum {
-    ROOTHERALD_VERDICT_ALLOW = 0,
-    ROOTHERALD_VERDICT_WARN = 1,
-    ROOTHERALD_VERDICT_DENY = 2
-} RootHeraldVerdict;
-
-/* Result of RootHeraldClient_Verify. Caller-allocated; fields are
- * fixed-length null-terminated strings to avoid cross-ABI allocation. */
-typedef struct {
-    RootHeraldVerdict verdict;
-    char device_id[129];        /* UUID or opaque, null-terminated */
-    char tpm_class[64];         /* enum stringified, null-terminated */
-    char posture_json[1024];    /* opaque posture blob, null-terminated */
-    char reason[256];           /* human-readable reason on deny/warn */
-} RootHeraldVerifyResult;
-
-/* Result of RootHeraldClient_Enroll. Caller-allocated. */
-typedef struct {
-    char device_id[129];
-} RootHeraldEnrollResult;
-
-/* Result of RootHeraldClient_AttestSession. Caller-allocated. */
-typedef struct {
-    char session_id[64];
-    char status[32];            /* "verified" | "failed" | "expired" */
-    char authorization_code[128];
-    char redirect_uri[2048];
-    char reason[512];           /* human-readable failure reason */
-} RootHeraldAttestResult;
+/*
+ * NOTE (ABI 3.0): the client-side verdict surface is gone. There is no
+ * RootHeraldVerdict enum and no RootHeraldVerifyResult / RootHeraldAttestResult /
+ * RootHeraldEnrollResult struct — a verdict is computed and enforced by the
+ * customer's BACKEND (it never travels through the client), and enrollment now
+ * emits opaque JSON blobs rather than filling a result struct. See the changelog.
+ */
 
 /* Result of RootHeraldClient_GetDeviceInfo. Caller-allocated. */
 typedef struct {
@@ -185,14 +205,12 @@ typedef struct {
 /* ------------------------------------------------------------------ */
 
 /**
- * Create a new client.
- *   api_key  : your tenant's publishable key (rh_pk_live_...). Required.
- *   endpoint : base URL. NULL means "default rootherald.io".
- * Returns NULL on out-of-memory or invalid argument.
+ * Create a new client. Takes no api_key and no endpoint — the client is keyless
+ * and opens no socket to RootHerald (ABI 3.0). The handle holds only local config
+ * (application id, mock mode) and per-process TPM context. Returns NULL on
+ * out-of-memory.
  */
-ROOTHERALD_API RootHeraldClient* RootHeraldClient_Create(
-    const char* api_key,
-    const char* endpoint);
+ROOTHERALD_API RootHeraldClient* RootHeraldClient_Create(void);
 
 /**
  * Destroy a client. Safe to call with NULL.
@@ -200,17 +218,8 @@ ROOTHERALD_API RootHeraldClient* RootHeraldClient_Create(
 ROOTHERALD_API void RootHeraldClient_Destroy(RootHeraldClient* client);
 
 /* ------------------------------------------------------------------ */
-/* Endpoint and config                                                */
+/* Config                                                             */
 /* ------------------------------------------------------------------ */
-
-/**
- * Replace the endpoint URL after construction. The library treats every
- * endpoint identically — the URL distinguishes direct / custom-domain /
- * proxy mode but the wire format is the same in all three cases.
- */
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetEndpoint(
-    RootHeraldClient* client,
-    const char* endpoint);
 
 /**
  * Associate this client with a logical application id (e.g. "launcher",
@@ -230,80 +239,80 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetMockTpm(
     int mock_enabled);
 
 /* ------------------------------------------------------------------ */
-/* Verify operation                                                   */
-/* ------------------------------------------------------------------ */
-
-/**
- * Collect fresh attestation evidence and obtain a server-authoritative verdict.
- *   action       : the relying-party-defined action being authorized
- *                  (e.g. "game-launch", "transfer-funds"). NULL → "default".
- *   out_result   : caller-allocated; fields are populated on ROOTHERALD_OK.
- *
- * Returns ROOTHERALD_OK iff the server returned an authoritative verdict.
- * Network and server errors return distinct codes so the caller can
- * fail-open or fail-closed per policy.
- *
- * PLATFORM SUPPORT (important): this one-call flow is functional only on
- * Windows today. On Linux and macOS it is NOT yet wired to the real server
- * protocol (which requires a server-created session and server-issued nonce);
- * the non-mock path returns ROOTHERALD_ERR_INTERNAL with a "not yet
- * implemented" reason instead of a verdict. The mock path
- * (RootHeraldClient_SetMockTpm) returns a canned ALLOW for CI only — never a
- * real verdict.
- */
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_Verify(
-    RootHeraldClient* client,
-    const char* action,
-    RootHeraldVerifyResult* out_result);
-
-/* ------------------------------------------------------------------ */
-/* Session-based attestation (server-challenge flow)                  */
+/* Enrollment (keyless, backend-relayed two-leg handshake)            */
 /* ------------------------------------------------------------------ */
 /*
- * The session flow is the server-driven counterpart to Verify(): your
- * backend creates an attestation session (and challenge nonce) with the
- * Root Herald API, hands the session id + nonce to the device, and the
- * device answers the challenge with a fresh hardware quote. On success
- * the result carries an authorization code your backend redeems.
+ * Enrollment is a one-time (or rotation) bootstrap of the device attestation
+ * key. It is irreducibly TWO server round-trips with a TPM op between them, and
+ * RootHerald computes a MakeCredential challenge to the EK that the TPM must
+ * decrypt with ActivateCredential. ABI 3.0 splits the TPM-only halves out and
+ * removes the network: the client emits/consumes opaque JSON blobs the embedder's
+ * BACKEND relays to RootHerald (authenticated with its rh_sk_):
  *
- * Every enroll/activate/attest request issued by these entry points
- * carries the handle's publishable key as the `X-RootHerald-Site-Key`
- * header so the attestation is attributed to your tenant.
+ *   1. EnrollBegin(client, &request_json)
+ *        -> local: gen AK + gather EK pub/cert chain under a SINGLE elevation
+ *           (raw-TBS). Emits the verbatim POST /api/v1/devices/enroll body.
+ *      [backend relays it; RootHerald validates the EK chain + AK template,
+ *       MakeCredential-seals a secret to the EK, returns {deviceId,
+ *       credentialBlob, encryptedSecret} — the deviceId is known after leg 1.]
+ *   2. EnrollComplete(client, challenge_json, &activation_json)
+ *        -> local: TPM2_ActivateCredential over that challenge. Emits the
+ *           verbatim POST /api/v1/devices/activate body ({deviceId,
+ *           decryptedSecret}).
+ *      [backend relays it; RootHerald constant-time compares the secret and
+ *       Name-match guards the bound AK -> enrolled.]
  *
- * Currently fully implemented on Windows. On Linux and macOS these
- * entry points compile and link but return ROOTHERALD_ERR_INTERNAL
- * until the per-platform implementations land.
+ * NEITHER call opens a socket or consults a key. Both returned buffers are
+ * caller-owned and freed with RootHeraldClient_FreeEvidence.
+ *
+ * ELEVATION + SINGLE-ELEVATION SPAN: raw-TBS AK creation (begin) and
+ * TPM2_ActivateCredential (complete) require an ELEVATED process; an
+ * unprivileged caller gets ROOTHERALD_ERR_ELEVATION_REQUIRED. The library never
+ * elevates on your behalf. Critically, the transient EK+AK TPM context that
+ * ActivateCredential needs is established in begin and cannot be reconstructed
+ * from the persisted handle alone, so the SAME (elevated) process must remain
+ * resident from EnrollBegin through EnrollComplete — the one elevation spans the
+ * relayed network round-trip. The embedder/host arranges that (e.g. an elevated
+ * worker that emits the begin blob over IPC, waits for the relayed challenge,
+ * then calls complete).
+ *
+ * PLATFORM SUPPORT: functional on Windows. Linux/macOS declare the symbols for
+ * ABI uniformity but return ROOTHERALD_ERR_INTERNAL until their collectors land.
  */
 
 /**
- * Ensure this device is enrolled with the endpoint configured on the client.
- * ALREADY_ENROLLED is mapped to ROOTHERALD_OK (out->device_id still filled).
- *   force_reenroll : 0 keeps an existing enrollment; non-zero rotates the
- *                    attestation key and re-enrolls.
+ * Begin enrollment: create an AK and gather EK pub + EK cert chain under a single
+ * elevation, then emit the POST /api/v1/devices/enroll request body.
+ *   out_request_json : on ROOTHERALD_OK, a newly-allocated NUL-terminated JSON
+ *                      string ({ekPublicKey, akPublicArea, platform, optional
+ *                      ekCertPem, optional ekCertificateChain}). Caller OWNS it;
+ *                      free with RootHeraldClient_FreeEvidence. NULL on error.
+ * Returns ROOTHERALD_ERR_ELEVATION_REQUIRED if the process is not elevated.
  */
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_Enroll(
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollBegin(
     RootHeraldClient* client,
-    int force_reenroll,
-    RootHeraldEnrollResult* out_result);
+    char** out_request_json);
 
 /**
- * Server-challenge attestation: TPM quote over nonce for an existing session.
- * nonce_b64 is a null-terminated base64 string (no separate length param).
+ * Complete enrollment: run TPM2_ActivateCredential over the server's
+ * MakeCredential challenge and emit the POST /api/v1/devices/activate body.
+ *   challenge_json     : the verbatim /enroll response the backend relayed back
+ *                        ({deviceId, credentialBlob, encryptedSecret}). Required.
+ *   out_activation_json: on ROOTHERALD_OK, a newly-allocated NUL-terminated JSON
+ *                        string ({deviceId, decryptedSecret}). Caller OWNS it;
+ *                        free with RootHeraldClient_FreeEvidence. NULL on error.
+ * MUST be called in the same resident (elevated) process as the matching
+ * EnrollBegin (see "single-elevation span" above). Returns
+ * ROOTHERALD_ERR_NOT_ENROLLED if no in-flight EnrollBegin state is present.
  */
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_AttestSession(
+ROOTHERALD_API RootHeraldStatus RootHeraldClient_EnrollComplete(
     RootHeraldClient* client,
-    const char* session_id,
-    const char* nonce_b64,
-    RootHeraldAttestResult* out_result);
+    const char* challenge_json,
+    char** out_activation_json);
 
-/**
- * One-shot link token consumed by the next AttestSession on this handle.
- * Binds that attestation to a user account. Pass NULL to clear a pending
- * token.
- */
-ROOTHERALD_API RootHeraldStatus RootHeraldClient_SetLinkToken(
-    RootHeraldClient* client,
-    const char* link_token);
+/* ------------------------------------------------------------------ */
+/* Local device info                                                  */
+/* ------------------------------------------------------------------ */
 
 /**
  * Local device/TPM status; never touches the network.
@@ -319,8 +328,8 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_GetDeviceInfo(
  * round-trip — TPM reachability, local enrollment, EK certificate
  * presence, Secure Boot state, OEM platform-key identity, and measured-
  * boot log counts. This is the free pre-flight check: call it cheaply
- * (e.g. from a game launcher) before spending a billable Verify /
- * AttestSession.
+ * (e.g. from a game launcher) before spending a billable attestation
+ * (CollectEvidence + the backend's /verify).
  *
  * Honesty rule: these are READINESS SIGNALS, not a verdict — the verdict
  * is always server-side (tenant policy + trust-anchor chain validation),
@@ -336,12 +345,13 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
     RootHeraldPosture* out_result);
 
 /* ------------------------------------------------------------------ */
-/* Background-Check collect-only (contract C5, ABI 1.3)               */
+/* Per-attestation evidence collection (keyless)                      */
 /* ------------------------------------------------------------------ */
 /*
- * The "dumb client" surface for the RATS Background-Check model. The on-device
- * client collects a self-contained evidence blob and returns it to the embedder
- * — it makes NO RootHerald network call and needs NO API/site key.
+ * The per-attestation verb for the RATS Background-Check model. The on-device
+ * client collects a self-contained evidence blob (a fresh TPM quote over a
+ * backend-issued nonce) and returns it to the embedder — it makes NO RootHerald
+ * network call and needs NO key.
  *
  * BOUNDARY — READ THIS. This is a CLIENT library. It collects evidence; it
  * NEVER verifies anything and NEVER holds a secret. The `rh_sk_` secret key and
@@ -351,18 +361,16 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
  *   2. (customer server) relay the blob server→server, authenticated with the
  *                        customer's `rh_sk_` secret key, to
  *                        `POST /api/v1/attestations/verify`.
- *   3. (RootHerald)     appraise it and return a verdict to the customer server.
+ *   3. (RootHerald)     appraise it and return a verdict to the customer server,
+ *                        which ENFORCES it (the verdict never travels through the
+ *                        client).
  * The `rh_sk_` secret MUST NOT ever be compiled into, passed to, or stored by
  * this library — putting it on the device defeats the model. To implement
  * step 2 in the customer backend, use a SERVER SDK (a different component):
  * @rootherald/node, sdk-go, sdk-dotnet, sdk-java, sdk-php, or sdk-ruby at
  * https://github.com/RootHerald.
  *
- * This is the privacy-/liability-preferred default: no client-side secret can
- * leak, and the customer's server is the trust boundary. The key-bearing
- * Passport entry points (RootHeraldClient_Create / _AttestSession / _Verify)
- * stay for the backend-less "badge" tier; they carry only a PUBLISHABLE key
- * (rh_pk_), never the rh_sk_ secret, and still never verify on-device.
+ * Step-up / re-attest (RFC 9470) is just calling this again with a fresh nonce.
  */
 
 /**
@@ -380,14 +388,13 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
  *                       NUL-terminated JSON string — the self-contained evidence
  *                       blob. This is EXACTLY the object the server's
  *                       `/attestations/verify` expects in its `evidence` field
- *                       (the same AttestationRequest-shaped payload the collector
- *                       produces for the Passport `/attest` POST, MINUS the
- *                       Passport-only `sessionId` / `linkToken` fields). The
+ *                       (an AttestationRequest-shaped payload: quote-over-nonce,
+ *                       PCRs, event log, EK cert chain, secure-boot chain). The
  *                       customer's server forwards it verbatim. The caller OWNS
  *                       the buffer and MUST free it with
  *                       RootHeraldClient_FreeEvidence. Set to NULL on any error.
  *
- * No RootHeraldClient_Create api_key is consulted — this call collects only.
+ * Keyless — no key is consulted; this call collects only.
  * Returns ROOTHERALD_OK on success; ROOTHERALD_ERR_NOT_ENROLLED if no enrolled
  * attestation key exists on the device; ROOTHERALD_ERR_TPM_UNAVAILABLE /
  * ROOTHERALD_ERR_SERVER on a TPM / quote failure; ROOTHERALD_ERR_INVALID_ARG on
@@ -395,7 +402,7 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectPosture(
  *
  * PLATFORM SUPPORT: functional on Windows. Linux and macOS declare the entry
  * point (so the ABI is uniform) but return ROOTHERALD_ERR_INTERNAL until their
- * per-platform collectors land — consistent with the other session entry points.
+ * per-platform collectors land.
  */
 ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectEvidence(
     const char* nonce_b64,
@@ -408,30 +415,6 @@ ROOTHERALD_API RootHeraldStatus RootHeraldClient_CollectEvidence(
  * it is a generic char* deallocator.
  */
 ROOTHERALD_API void RootHeraldClient_FreeEvidence(char* evidence_json);
-
-/* ------------------------------------------------------------------ */
-/* Enrollment                                                          */
-/* ------------------------------------------------------------------ */
-/*
- * Enrollment runs under a SINGLE elevation via RootHeraldClient_Enroll (the
- * elevated-TBS path): the client/host triggers a one-shot elevated child that
- * creates the AK, runs TPM2_ActivateCredential to bind it to the EK, and evicts
- * it to a persistent handle. The earlier page-driven keyless split
- * (RootHeraldClient_EnrollCollect / _EnrollActivate, ABI 1.4) was removed once
- * raw-TBS activation was proven to succeed under elevation — it existed only to
- * dodge the UAC via PCP, whose AIK is locked to a SHA-1 scheme. Per-request
- * attestation (RootHeraldClient_CollectEvidence) remains unprivileged.
- */
-
-/**
- * Elevated-child entry for the Windows TBS activation fallback (public
- * re-export of the legacy RootHeraldRunElevatedEstablishKey). Hosts MUST
- * route `--establish-key <url> <path>` argv here before normal startup;
- * documented in INTEGRATING.md. Returns 0 on success.
- */
-ROOTHERALD_API int RootHerald_RunElevatedEstablishKey(
-    const char* server_url,
-    const char* result_path);
 
 /* ------------------------------------------------------------------ */
 /* Logging                                                            */

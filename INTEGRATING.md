@@ -8,13 +8,20 @@ service or daemon to install on the customer's machine.
 Public surface: **one header**, `common/rootherald.h`. C99-compatible,
 consumable from C, C++, Rust, Go, Swift, .NET P/Invoke, etc.
 
-> **Platform status up front.** `RootHeraldClient_Verify` (and the rest of the
-> attestation surface) is **functional on Windows only** today (developer-
-> dogfooded against a real TPM; not yet externally validated). On **Linux** and
-> **macOS** the non-mock path is **not yet implemented** — it returns
-> `ROOTHERALD_ERR_INTERNAL` ("not yet implemented") rather than a verdict. Mock
-> mode (`RootHeraldClient_SetMockTpm`) returns a canned `ALLOW` for **CI only**
-> and is never a real verdict.
+> **Keyless client (ABI 3.0).** The client holds **no RootHerald key** and opens
+> **no socket to RootHerald**. It does local TPM work and emits/consumes opaque
+> JSON blobs; **your backend** relays those blobs to RootHerald. The three verbs:
+>   - **EnrollBegin / EnrollComplete** — one-time keyless device-key bootstrap;
+>     emit the `/devices/enroll` then `/devices/activate` request bodies.
+>   - **CollectEvidence** — per-attestation: a fresh quote over a backend-issued
+>     nonce → an evidence blob your backend relays to `/attestations/verify`.
+>   - **CollectPosture / GetDeviceInfo** — local readiness signals (never a verdict).
+>
+> **Platform status.** The attestation surface is **functional on Windows only**
+> today (developer-dogfooded against a real TPM; not yet externally validated). On
+> **Linux** and **macOS** the keyless verbs are **not yet implemented** — they
+> return `ROOTHERALD_ERR_INTERNAL` ("not yet implemented") rather than fabricating
+> evidence.
 >
 > **This is a client library: it collects evidence, it never verifies.** Token
 > /verdict verification and the `rh_sk_` secret key belong to a *separate*
@@ -42,15 +49,18 @@ int main(void) {
     RootHerald_SetLogCallback(on_log, NULL);
     RootHerald_SetLogLevel(ROOTHERALD_LOG_INFO);
 
-    RootHeraldClient* c = RootHeraldClient_Create("rh_pk_live_...", NULL);
+    RootHeraldClient* c = RootHeraldClient_Create();   /* keyless: no key, no endpoint */
     if (!c) return 1;
 
-    RootHeraldVerifyResult r;
-    RootHeraldStatus st = RootHeraldClient_Verify(c, "game-launch", &r);
+    /* Per-attestation: collect an evidence blob over a backend-issued nonce.
+     * Hand the blob to YOUR backend to relay to /api/v1/attestations/verify. */
+    char* evidence = NULL;
+    RootHeraldStatus st = RootHeraldClient_CollectEvidence(nonce_b64, &evidence);
     if (st == ROOTHERALD_OK) {
-        printf("verdict=%d device=%s class=%s\n", r.verdict, r.device_id, r.tpm_class);
+        send_to_my_backend(evidence);   /* your channel; your backend holds rh_sk_ */
+        RootHeraldClient_FreeEvidence(evidence);
     } else {
-        printf("verify failed: %s\n", RootHerald_ErrorString(st));
+        printf("collect failed: %s\n", RootHerald_ErrorString(st));
     }
 
     RootHeraldClient_Destroy(c);
@@ -62,67 +72,44 @@ A runnable copy of the above lives under `samples/minimal/<platform>/`.
 
 > **Platform support.** The quickstart above is fully functional on
 > **Windows** only (and there only as developer-dogfooded — not yet validated
-> by an external integrator). On **Linux** and **macOS**, one-call `Verify` is
+> by an external integrator). On **Linux** and **macOS** the keyless verbs are
 > still **in development**: the non-mock path returns `ROOTHERALD_ERR_INTERNAL`
-> ("not yet implemented") because it is not wired to the real server protocol
-> yet. See "Session-based attestation" below for the full breakdown.
+> ("not yet implemented") because the collectors are not wired yet.
 
-## Session-based attestation (server-challenge flow)
+## Enrollment (keyless, backend-relayed)
 
-`RootHeraldClient_Verify` is the one-call, client-initiated path. For flows
-where **your backend** owns the challenge — login binding, step-up
-authorization, the hosted attestation UI — use the session surface instead:
-
-1. Your backend creates an attestation session with the Root Herald API and
-   receives a `session_id` plus a base64 challenge `nonce`.
-2. Your backend hands both to the device (your app, or the Root Herald
-   browser extension + native host).
-3. The device answers the challenge with a fresh hardware quote.
-4. On success the result carries an `authorization_code` your backend
-   redeems to obtain the attestation verdict/JWT.
+Enrollment is a one-time (or rotation) bootstrap of the device attestation key.
+It is two server round-trips with a TPM op between, and the client emits/consumes
+opaque blobs your backend relays — the client never POSTs and holds no key:
 
 ```c
-RootHeraldClient* c = RootHeraldClient_Create("rh_pk_live_...", NULL);
+RootHeraldClient* c = RootHeraldClient_Create();
 
-/* One-time (idempotent) device enrollment. ALREADY_ENROLLED maps to OK. */
-RootHeraldEnrollResult e;
-if (RootHeraldClient_Enroll(c, /*force_reenroll=*/0, &e) != ROOTHERALD_OK) { /* ... */ }
+/* Leg 1: gen AK + gather EK under a SINGLE elevation; emit the /enroll body. */
+char* enroll_request = NULL;
+RootHeraldStatus st = RootHeraldClient_EnrollBegin(c, &enroll_request);
+if (st == ROOTHERALD_ERR_ELEVATION_REQUIRED) { /* see "Windows elevation" below */ }
+/* your backend POSTs enroll_request to /api/v1/devices/enroll (rh_sk_ auth) and
+ * relays back the MakeCredential challenge {deviceId,credentialBlob,encryptedSecret} */
+RootHeraldClient_FreeEvidence(enroll_request);
 
-/* Optional: bind the next attestation to a user account. One-shot. */
-RootHeraldClient_SetLinkToken(c, link_token_from_your_backend);
-
-/* Answer the server's challenge. nonce_b64 is the null-terminated base64
- * nonce exactly as your backend received it from the Root Herald API. */
-RootHeraldAttestResult a;
-RootHeraldStatus st = RootHeraldClient_AttestSession(c, session_id, nonce_b64, &a);
-if (st == ROOTHERALD_OK && strcmp(a.status, "verified") == 0) {
-    /* hand a.authorization_code back to your backend */
-}
-
-/* Local device/TPM status — never touches the network. */
-RootHeraldDeviceInfo info;
-RootHeraldClient_GetDeviceInfo(c, &info);
+/* Leg 2: TPM2_ActivateCredential over the challenge; emit the /activate body.
+ * MUST run in the SAME (elevated, resident) process as EnrollBegin. */
+char* activation = NULL;
+st = RootHeraldClient_EnrollComplete(c, challenge_json, &activation);
+/* your backend POSTs activation to /api/v1/devices/activate -> enrolled. */
+RootHeraldClient_FreeEvidence(activation);
 ```
 
-Every enroll/activate/attest request issued through a client handle carries
-the handle's publishable key as the `X-RootHerald-Site-Key` header, so the
-attestation is attributed (and billed) to your tenant.
+Account binding is your backend's job: it maps the verified `deviceId` (known
+after leg 1) to its user. Step-up / re-attest (RFC 9470) is just calling
+`RootHeraldClient_CollectEvidence` again with a fresh nonce. Key rotation is
+re-running the enroll handshake.
 
-The session surface is implemented on **Windows** today (developer-dogfooded
+The keyless verbs are implemented on **Windows** today (developer-dogfooded
 against the real TPM; not yet externally validated). On Linux and macOS the
 entry points compile and link but return `ROOTHERALD_ERR_INTERNAL`
-("not implemented on this platform yet") until the per-platform
-implementations land.
-
-The same is true of the one-call `RootHeraldClient_Verify`: it is functional
-only on **Windows**. On **Linux** and **macOS** the non-mock path is NOT yet
-wired to the real server protocol (it needs a server-created session and
-server-issued nonce; on macOS the Secure Enclave attestation is also not yet
-server-verified), so it returns `ROOTHERALD_ERR_INTERNAL` with a "not yet
-implemented" reason rather than a verdict. The only Linux/macOS path that
-returns an `ALLOW` today is explicit mock mode
-(`RootHeraldClient_SetMockTpm`), which yields a canned result for CI and is
-never a real verdict.
+("not implemented on this platform yet") until the per-platform collectors land.
 
 ## Pre-flight check: `RootHeraldClient_CollectPosture`
 
@@ -130,9 +117,9 @@ never a real verdict.
 snapshot — it never touches the network. Use it to cheaply test whether a
 device is ready to attest (TPM reachable, locally enrolled, vendor EK cert
 present, Secure Boot on, known-OEM platform key, measured-boot log counts)
-before spending a billable `Verify` / `AttestSession`. A game launcher,
-for example, can gate its "Verify this device" button on it, or surface
-"what will the server see?" diagnostics to the user for free.
+before spending a billable attestation (`CollectEvidence` + the backend's
+`/verify`). A game launcher, for example, can gate its "Verify this device"
+button on it, or surface "what will the server see?" diagnostics for free.
 
 ```c
 RootHeraldPosture p;
@@ -160,46 +147,34 @@ only for an **elevated** process. Attestation afterwards is unprivileged forever
 (and whether) to acquire admin rights depends on your app, so the SDK *reports*
 the need and lets you choose:
 
-- `RootHeraldClient_Enroll` (and the auto-enroll inside `_AttestSession` /
-  `_Verify`) returns **`ROOTHERALD_ERR_ELEVATION_REQUIRED`** when the process
-  is not elevated.
+- `RootHeraldClient_EnrollBegin` (and `_EnrollComplete`) returns
+  **`ROOTHERALD_ERR_ELEVATION_REQUIRED`** when the process is not elevated.
 - A process that is **already elevated** (e.g. a Windows service) never sees
-  that code — enrollment runs in-process, no prompt.
+  that code — the TPM ops run in-process, no prompt.
 
-### The worker hook (needed by every elevated strategy)
+### Single elevation spans EnrollBegin → EnrollComplete
 
-Whatever gets you to an elevated context performs the actual enrollment by
-calling the SDK worker:
-
-```c
-RootHerald_RunElevatedEstablishKey(server_url, result_path); /* run ELEVATED */
-```
-
-It runs the raw-TBS enroll, writes the device id to `result_path`, and exits 0.
-The common way to reach it is to re-launch your own exe with an argv hook routed
-**before any normal startup**:
-
-```c
-int main(int argc, char** argv) {
-    if (argc >= 4 && strcmp(argv[1], "--establish-key") == 0)
-        return RootHerald_RunElevatedEstablishKey(argv[2], argv[3]);
-    /* ... normal startup ... */
-}
-```
+The keyless handshake interleaves a network round-trip (your backend relaying the
+two legs) between the two TPM ops. The transient EK+AK context that
+`EnrollComplete`'s `TPM2_ActivateCredential` needs is established by
+`EnrollBegin` and **cannot** be reconstructed from the persisted handle alone, so
+the **same (elevated) process must stay resident from `EnrollBegin` through
+`EnrollComplete`** — the one elevation spans the relay. Practically: run an
+**elevated worker** that calls `EnrollBegin`, writes the request blob out over
+IPC, waits for your backend's relayed challenge, then calls `EnrollComplete` and
+writes the activation blob out — all in that one resident process.
 
 ### Pick a strategy
 
 | Strategy | When | How |
 |---|---|---|
-| **Self-elevation shim** | Normal desktop apps | On `ELEVATION_REQUIRED`, re-spawn your own exe elevated (`ShellExecuteEx` verb `runas`) with `--establish-key <url> <path>`; the argv hook routes it. One UAC. **`samples/minimal/windows/main.cpp` shows this end to end.** |
-| **Use the RootHerald host** | Browser / native-messaging integrations | Ship our `rootherald_host.exe` (it already implements the shim). Your app does nothing native. |
-| **Privileged helper / service** | Apps that already run elevated, or can install a tiny signed helper | Call `RootHerald_RunElevatedEstablishKey` directly from the elevated context; the unprivileged side then sees the device as enrolled. |
+| **Elevated worker** | Normal desktop apps | On `ELEVATION_REQUIRED`, spawn a small elevated worker (`ShellExecuteEx` verb `runas`, one UAC) that drives `EnrollBegin`/`EnrollComplete` and shuttles the blobs to/from your unprivileged process over a pipe/file while staying resident across the relay. |
+| **Use the RootHerald host** | Browser / native-messaging integrations | Ship our `rootherald_host.exe` (it implements the elevated worker + relay plumbing). Your app does nothing native. |
+| **Privileged helper / service** | Apps that already run elevated | Call `RootHeraldClient_EnrollBegin` / `_EnrollComplete` directly from the elevated context; the unprivileged side then sees the device as enrolled. |
 | **Check-then-skip (degrade)** | Sandboxed / Store / locked-down apps that cannot elevate | Detect `ELEVATION_REQUIRED`, skip enrollment, and degrade gracefully (no attestation) rather than prompting. |
 
-Caller-supplied `server_url` must be the **same** RootHerald endpoint your
-unprivileged client uses, or the two halves target different servers. See the
-developer portal's "Windows elevation patterns" page for copy-paste samples of
-each strategy.
+Per-attestation `CollectEvidence` is always **unprivileged** — only the one-time
+enrollment needs elevation.
 
 ## Platform-specific notes
 
@@ -307,12 +282,13 @@ implementation must be thread-safe.
 
 ## Memory ownership
 
-No heap-allocated values cross the ABI. All result structs
-(`RootHeraldVerifyResult`, `RootHeraldEnrollResult`,
-`RootHeraldAttestResult`, `RootHeraldDeviceInfo`,
-`RootHeraldPosture`) are caller-allocated;
-the library only writes into them. All handles are opaque and must be
-paired with `RootHeraldClient_Destroy`.
+Result structs (`RootHeraldDeviceInfo`, `RootHeraldPosture`) are
+caller-allocated; the library only writes into them. The blob-emitting calls
+(`RootHeraldClient_EnrollBegin`, `RootHeraldClient_EnrollComplete`,
+`RootHeraldClient_CollectEvidence`) return a newly-allocated NUL-terminated
+`char*` the **caller owns** and **must free** with
+`RootHeraldClient_FreeEvidence`. All handles are opaque and must be paired with
+`RootHeraldClient_Destroy`.
 
 ## What this SDK does NOT do
 
@@ -321,16 +297,19 @@ paired with `RootHeraldClient_Destroy`.
   failure returns a status code.
 - It does not spawn threads, allocate from custom arenas, or install
   signal handlers. It calls the platform allocator and your TPM driver.
-- It does not bundle telemetry, analytics, or "phone-home" pings. The
-  only network traffic is the explicit POST to your configured endpoint.
+- It does not bundle telemetry, analytics, or "phone-home" pings. It opens
+  **no socket to RootHerald** at all — the only network it ever does is a
+  best-effort fetch to TPM-vendor PKI (e.g. AMD's AIA endpoint) to complete an
+  EK certificate chain. All RootHerald traffic is your backend's, not the SDK's.
 
 ## Diagnostics
 
-If `RootHeraldClient_Verify` returns a non-OK status:
+If a keyless verb (`EnrollBegin` / `EnrollComplete` / `CollectEvidence`) returns
+a non-OK status:
 
 1. `RootHerald_ErrorString(status)` for the human-readable category.
 2. Register a log callback at `ROOTHERALD_LOG_DEBUG` to see the per-step
-   trace (TPM init, evidence collection, HTTPS request/response).
+   trace (TPM init, AK create / activate, evidence collection).
 3. On Windows, run `tools/tpm_diag.exe` to confirm the platform exposes
    a usable TPM. On Linux, ensure `/dev/tpmrm0` exists and your process
    has access.

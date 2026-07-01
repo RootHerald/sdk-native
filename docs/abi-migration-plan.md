@@ -80,6 +80,49 @@ WP0 (contract)
 - **R5 — e2e needs reseed/re-enroll** on the local stack after the ABI change (existing
   `/try` re-enroll fallback applies).
 
-## Status
-WP0–WP7: **pending.** EK-opacity gate: **resolved** (plaintext today; deniability =
-deferred additive tweak). Awaiting go-ahead on contract + native-build approach.
+## Reality: this is a DELTA, not greenfield
+
+Much of the target is already in the working tree (ABI 2.0, 2026-06-27): PreCheck
+(`CollectPosture`), keyless Attest (`CollectEvidence`), and single-elevation enroll with
+PCP removed. See `target-abi.md` → *Current state vs. target delta*. The packages below
+are scoped to the **remaining delta** on top of that, not a from-scratch build.
+
+## Verification strategy (per package)
+- **TS/JS (contract, sdk-js, extension, fake-customer-web)** — build + vitest **locally**.
+- **.NET API** — build + xUnit **locally**.
+- **C++ natives (sdk-native, windows-host)** — source edits locally; **CI builds** on
+  push (no local cmake). The real host installer comes from `windows-host` `release.yml`
+  (rolling `alpha` pre-release) and is pulled locally by `dev-up.ps1`.
+- **Other server SDKs (go/php/ruby/java)** — source edits; **their CI** is the gate.
+- **e2e `/try`** — `dev-up.ps1` pulls the CI-built alpha host → docker stack → real
+  hardware run. Requires pushing `windows-host` to cut the release (flagged outward step).
+
+## Status (branch `feat/client-abi-2.0` in every repo)
+- **Baseline committed** (2026-06-30): sdk-native `acd3e91`, sdk-js `b017863`,
+  browser-extension `f90f328`, windows-host `75b0480`, platform `531e968`.
+- EK-opacity gate: **resolved** (plaintext v1; deniability = deferred additive tweak).
+- **WP0 contract** ✅ (409 union canonicalized). **WP1 API** ✅ (630 tests; activate now
+  accepts rh_sk_; client-verdict endpoints flagged deprecated). **WP2 sdk-native** ✅
+  (ABI 3.0; keyless Create; EnrollBegin/EnrollComplete; Verify/AttestSession/SetLinkToken
+  removed; **compiled locally on VS2022 + ran vs real TPM**; Linux/macOS CI-gated).
+  **WP3a node** ✅ (57 tests). **WP3b browser** ✅ (32 tests). **WP4 server SDKs** ✅
+  (dotnet 23 / go container-verified / ruby container-verified / java + php
+  correct-by-construction, CI-gated). **WP5 extension** ✅ (chrome/edge/firefox build).
+  **WP6 windows-host** ✅ (host+tray+installer built locally; resident elevated worker via
+  named-pipe IPC spans EnrollBegin→Complete). **WP7 /try** ✅ (rewired + re-vendored;
+  116 vitest; docker builds; stack up; /try 200).
+- **All changes uncommitted** on `feat/client-abi-2.0` (working trees).
+- **Remaining: real-hardware e2e** — install the new host + load the new extension +
+  click-through with UAC on the real TPM (human-in-the-loop).
+
+## Residual follow-ups (flagged, not blocking)
+- `@rootherald/node` `verify` drops top-level `assuranceClaimsMet` (contract
+  `VerifyAttestationResponse` only models `{verdict, token}`); the /try BFF kept the raw
+  `brokerVerify` for that leg. To make the node `verify` helper complete, add
+  `assuranceClaimsMet` to the contract + all server SDKs' `verify`.
+- `vendor/` is gitignored — the new `vendor/rootherald-sdk/contracts/dist/{server,enroll}.*`
+  must be `git add -f`'d before commit/CI or a fresh checkout misses the `/server` subpath.
+- sdk-dotnet's deferred `RootHerald.Native` FFI *preview* still exposes client-side
+  `Verify`/`SetEndpoint` — needs its own ABI-3.0 pass (deferred package).
+- windows-host `ci.yml` `SDK_NATIVE_REF` points at the branch; repin to a committed
+  sdk-native SHA once WP2 lands.
