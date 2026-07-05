@@ -1,6 +1,6 @@
 # Integrating RootHerald into your application
 
-This SDK ships as a **static archive** — `RootHerald.lib` (Windows),
+This SDK ships as a **static archive**: `RootHerald.lib` (Windows),
 `librootherald.a` (Linux/macOS). You link it into your own binary at
 compile time. There is no runtime DLL/SO/DYLIB dependency on us, and no
 service or daemon to install on the customer's machine.
@@ -11,25 +11,25 @@ consumable from C, C++, Rust, Go, Swift, .NET P/Invoke, etc.
 > **Keyless client (ABI 3.0).** The client holds **no RootHerald key** and opens
 > **no socket to RootHerald**. It does local TPM work and emits/consumes opaque
 > JSON blobs; **your backend** relays those blobs to RootHerald. The three verbs:
->   - **EnrollBegin / EnrollComplete** — one-time keyless device-key bootstrap;
+>   - **EnrollBegin / EnrollComplete**: one-time keyless device-key bootstrap;
 >     emit the `/devices/enroll` then `/devices/activate` request bodies.
->   - **CollectEvidence** — per-attestation: a fresh quote over a backend-issued
+>   - **CollectEvidence**: per-attestation, a fresh quote over a backend-issued
 >     nonce → an evidence blob your backend relays to `/attestations/verify`.
->   - **CollectPosture / GetDeviceInfo** — local readiness signals (never a verdict).
+>   - **CollectPosture / GetDeviceInfo**: local readiness signals (never a verdict).
 >
 > **Platform status.** The attestation surface is **functional on Windows only**
 > today (developer-dogfooded against a real TPM; not yet externally validated). On
-> **Linux** and **macOS** the keyless verbs are **not yet implemented** — they
+> **Linux** and **macOS** the keyless verbs are **not yet implemented**: they
 > return `ROOTHERALD_ERR_INTERNAL` ("not yet implemented") rather than fabricating
 > evidence.
 >
 > **This is a client library: it collects evidence, it never verifies.** Token
 > /verdict verification and the `rh_sk_` secret key belong to a *separate*
-> component — your backend, using a server SDK (`@rootherald/node`, `sdk-go`,
+> component: your backend, using a server SDK (`@rootherald/node`, `sdk-go`,
 > `sdk-dotnet`, `sdk-java`, `sdk-php`, `sdk-ruby` at
 > https://github.com/RootHerald). Never put the `rh_sk_` secret on the device.
 
-The library is **silent by default** — no writes to stdout/stderr unless
+The library is **silent by default**: no writes to stdout/stderr unless
 you register a log callback. This matches the convention set by libfido2,
 libsodium, libcurl, and mbedTLS: an embedded library should not impose
 log destinations on its host.
@@ -71,7 +71,7 @@ int main(void) {
 A runnable copy of the above lives under `samples/minimal/<platform>/`.
 
 > **Platform support.** The quickstart above is fully functional on
-> **Windows** only (and there only as developer-dogfooded — not yet validated
+> **Windows** only (and there only as developer-dogfooded, not yet validated
 > by an external integrator). On **Linux** and **macOS** the keyless verbs are
 > still **in development**: the non-mock path returns `ROOTHERALD_ERR_INTERNAL`
 > ("not yet implemented") because the collectors are not wired yet.
@@ -80,7 +80,7 @@ A runnable copy of the above lives under `samples/minimal/<platform>/`.
 
 Enrollment is a one-time (or rotation) bootstrap of the device attestation key.
 It is two server round-trips with a TPM op between, and the client emits/consumes
-opaque blobs your backend relays — the client never POSTs and holds no key:
+opaque blobs your backend relays. The client never POSTs and holds no key:
 
 ```c
 RootHeraldClient* c = RootHeraldClient_Create();
@@ -114,7 +114,7 @@ entry points compile and link but return `ROOTHERALD_ERR_INTERNAL`
 ## Pre-flight check: `RootHeraldClient_CollectPosture`
 
 `RootHeraldClient_CollectPosture` is a **local-only** device-readiness
-snapshot — it never touches the network. Use it to cheaply test whether a
+snapshot that never touches the network. Use it to cheaply test whether a
 device is ready to attest (TPM reachable, locally enrolled, vendor EK cert
 present, Secure Boot on, known-OEM platform key, measured-boot log counts)
 before spending a billable attestation (`CollectEvidence` + the backend's
@@ -133,8 +133,8 @@ if (RootHeraldClient_CollectPosture(c, &p) == ROOTHERALD_OK) {
 ```
 
 **Honesty rule:** these are *readiness signals*, never a verdict. The
-verdict is always server-side — tenant policy and trust-anchor chain
-validation are unknowable locally — so never render posture output as
+verdict is always server-side: tenant policy and trust-anchor chain
+validation are unknowable locally, so never render posture output as
 "you will pass". Implemented on **Windows** today; the Linux/macOS stubs
 return `ROOTHERALD_ERR_INTERNAL` like the rest of the session surface.
 
@@ -143,14 +143,14 @@ return `ROOTHERALD_ERR_INTERNAL` like the rest of the session surface.
 First-time **enrollment** runs `TPM2_ActivateCredential`, which Windows permits
 only for an **elevated** process. Attestation afterwards is unprivileged forever.
 
-**The SDK never elevates on your behalf.** Elevation is a policy decision — how
+**The SDK never elevates on your behalf.** Elevation is a policy decision: how
 (and whether) to acquire admin rights depends on your app, so the SDK *reports*
 the need and lets you choose:
 
 - `RootHeraldClient_EnrollBegin` (and `_EnrollComplete`) returns
   **`ROOTHERALD_ERR_ELEVATION_REQUIRED`** when the process is not elevated.
 - A process that is **already elevated** (e.g. a Windows service) never sees
-  that code — the TPM ops run in-process, no prompt.
+  that code: the TPM ops run in-process, no prompt.
 
 ### Single elevation spans EnrollBegin → EnrollComplete
 
@@ -159,10 +159,10 @@ two legs) between the two TPM ops. The transient EK+AK context that
 `EnrollComplete`'s `TPM2_ActivateCredential` needs is established by
 `EnrollBegin` and **cannot** be reconstructed from the persisted handle alone, so
 the **same (elevated) process must stay resident from `EnrollBegin` through
-`EnrollComplete`** — the one elevation spans the relay. Practically: run an
+`EnrollComplete`**: the one elevation spans the relay. Practically: run an
 **elevated worker** that calls `EnrollBegin`, writes the request blob out over
 IPC, waits for your backend's relayed challenge, then calls `EnrollComplete` and
-writes the activation blob out — all in that one resident process.
+writes the activation blob out, all in that one resident process.
 
 ### Pick a strategy
 
@@ -173,7 +173,7 @@ writes the activation blob out — all in that one resident process.
 | **Privileged helper / service** | Apps that already run elevated | Call `RootHeraldClient_EnrollBegin` / `_EnrollComplete` directly from the elevated context; the unprivileged side then sees the device as enrolled. |
 | **Check-then-skip (degrade)** | Sandboxed / Store / locked-down apps that cannot elevate | Detect `ELEVATION_REQUIRED`, skip enrollment, and degrade gracefully (no attestation) rather than prompting. |
 
-Per-attestation `CollectEvidence` is always **unprivileged** — only the one-time
+Per-attestation `CollectEvidence` is always **unprivileged**; only the one-time
 enrollment needs elevation.
 
 ## Platform-specific notes
@@ -199,8 +199,8 @@ enrollment needs elevation.
   and `libcurl4-openssl-dev` (Debian/Ubuntu) or equivalents.
 - Requires a kernel exposing `/dev/tpmrm0` (the TPM resource manager).
 - Configure: `cmake -B build -S linux`
-- For CI / agents without TPM hardware, pass `-DROOTHERALD_STUB=ON` —
-  this builds a **stub** that returns canned mock evidence. **Never ship
+- For CI / agents without TPM hardware, pass `-DROOTHERALD_STUB=ON`.
+  This builds a **stub** that returns canned mock evidence. **Never ship
   a stub build to customers.**
 
 ### macOS (`macos/`)
@@ -252,7 +252,7 @@ transitively via `target_link_libraries(... PUBLIC ...)`.
 Add `RootHerald.lib` to `Linker → Input → Additional Dependencies` and
 add `common/` to `C/C++ → General → Additional Include Directories`. The
 system libraries (ncrypt.lib, tbs.lib, winhttp.lib, bcrypt.lib, crypt32.lib)
-also need to be added — they are not auto-imported when the consumer is
+also need to be added; they are not auto-imported when the consumer is
 not using CMake.
 
 ### Make / autotools
@@ -277,7 +277,7 @@ Query the runtime version with `RootHerald_LibraryVersionString()` and
 A `RootHeraldClient*` is **not** safe for concurrent use across threads.
 Serialize calls behind a mutex if you share a single handle, or create
 one handle per worker. The log callback registration is process-wide and
-may be invoked from any thread the library does work on — your callback
+may be invoked from any thread the library does work on, so your callback
 implementation must be thread-safe.
 
 ## Memory ownership
@@ -298,7 +298,7 @@ caller-allocated; the library only writes into them. The blob-emitting calls
 - It does not spawn threads, allocate from custom arenas, or install
   signal handlers. It calls the platform allocator and your TPM driver.
 - It does not bundle telemetry, analytics, or "phone-home" pings. It opens
-  **no socket to RootHerald** at all — the only network it ever does is a
+  **no socket to RootHerald** at all. The only network it ever does is a
   best-effort fetch to TPM-vendor PKI (e.g. AMD's AIA endpoint) to complete an
   EK certificate chain. All RootHerald traffic is your backend's, not the SDK's.
 
