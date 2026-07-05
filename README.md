@@ -4,7 +4,7 @@ Embeddable static library for hardware-rooted device attestation. You link it
 into your native app and call `Verify` to get back a verdict tied to the
 device's TPM (Windows) or Secure Enclave (macOS). One C ABI, declared in
 [`common/rootherald.h`](./common/rootherald.h); all platforms expose it, but
-not all platforms have a working `Verify` yet — see the status column.
+not all platforms have a working `Verify` yet; see the status column.
 
 ## Platforms
 
@@ -91,7 +91,7 @@ Enrollment is the two-leg keyless handshake `RootHeraldClient_EnrollBegin` →
 (backend relays) → `RootHeraldClient_EnrollComplete`; see
 [INTEGRATING.md](./INTEGRATING.md). This works on **Windows** today. On **Linux**
 and **macOS** these calls currently return `ROOTHERALD_ERR_INTERNAL` ("not yet
-implemented") — see the platform status table above before integrating.
+implemented"); see the platform status table above before integrating.
 
 Runnable copies live under [`samples/minimal/`](./samples/). For linking,
 ABI/threading/memory contracts, and per-platform notes, see
@@ -99,7 +99,7 @@ ABI/threading/memory contracts, and per-platform notes, see
 
 ## Higher-level bindings
 
-If you're not writing C/C++/Obj-C, use the language SDK instead — each wraps
+If you're not writing C/C++/Obj-C, use the language SDK instead. Each wraps
 this same library:
 
 | Language | Package |
