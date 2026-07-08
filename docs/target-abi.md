@@ -1,11 +1,14 @@
 # Target client ABI (design direction)
 
-> **Status: reconciled direction; partially executed.** This note merges two
-> lineages (see *Provenance*). The **single-elevation / PCP-removal simplification**
-> is already done in the working tree (ABI 2.0, 2026-06-27). The **no-keys-in-client +
-> backend-relayed enroll + remove `Verify`/`AttestSession`** direction is the remaining
-> delta (from the 2026-06-30 design pass). It is a **breaking ABI change**; the SDKs
-> are private/alpha, so the break is acceptable when we land it.
+> **Status: DONE (ABI 3.0).** This note merges two lineages (see *Provenance*). The
+> **single-elevation / PCP-removal simplification** (ABI 2.0, 2026-06-27) and the
+> **no-keys-in-client + backend-relayed enroll + remove `Verify`/`AttestSession`**
+> direction (2026-06-30 design pass) have BOTH landed. The client is now keyless:
+> it holds no RootHerald key of any kind and opens no socket to RootHerald — not
+> the secret key, and no client-facing tenant key either (that whole concept and
+> its request-header transport were removed entirely, not relocated). It was a
+> breaking ABI change, accepted under the private/alpha tag. This note is retained
+> for provenance/design rationale.
 
 ## Provenance (so we don't relitigate)
 
@@ -31,8 +34,9 @@ latter.
 ## The invariant that drives everything
 
 **The client never holds a RootHerald API key, and never opens a socket to
-RootHerald.** Not the secret key (`rh_sk_` — that can *never* be in a client), and not
-even the publishable key (`rh_pk_`). The client's entire job is: **do local TPM
+RootHerald.** Not the secret key (`rh_sk_` — that can *never* be in a client), and
+there is no client-facing key of any kind — the old client-facing tenant-key idea was
+dropped, not relocated. The client's entire job is: **do local TPM
 operations and hand opaque blobs to the embedder.** The embedder's backend moves those
 blobs to/from RootHerald. (Enrollment still requires a one-time **elevation** for the
 TPM work — that's a privilege concern, separate from holding a network key.)
@@ -103,7 +107,7 @@ never travels through the client.
 | `RootHeraldClient_Verify` (client-gets-verdict) | A footgun: invites `if (verdict != allow) reject()` in client code, which *looks* like security but is trivially bypassed. Its only honest niche (non-adversarial / no-backend "badge") we are not pursuing. |
 | `RootHeraldClient_AttestSession` + `SetLinkToken` | OIDC/authorization-code shape; only earns its keep for an IdP product (deferred — Shield-only). `Attest` does the same job with the client never touching RootHerald. Account binding = backend maps verified `deviceId` → its user. |
 | `RootHeraldClient_GetDeviceInfo` | Folded into **PreCheck**. |
-| Client publishable key + `SetEndpoint` | Unnecessary once enroll is relayed and attest is keyless — the client holds no key and talks only to its own backend. |
+| Client key + `SetEndpoint` | Unnecessary once enroll is relayed and attest is keyless — the client holds no key and talks only to its own backend. |
 
 Kept as mechanics (not "capabilities"): handle lifecycle (`Create`/`Destroy`), the
 elevated-enroll entry (`RunElevatedEstablishKey` or its successor), logging, and gated

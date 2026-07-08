@@ -561,7 +561,7 @@ static std::unique_ptr<RootHerald::IAttestationKeyProvider> SelectEnrolledProvid
 // TBS context, read PCRs, TPM2_Quote over the caller's nonce, parse the TCG
 // event log + Secure Boot chain, and gather the EK cert + intermediate chain —
 // and returns the assembled evidence as a key/value map. It performs NO network
-// call and requires NO API/site key. Both the Passport direct-POST path
+// call and requires NO key. Both the Passport direct-POST path
 // (RootHeraldAttest) and the dumb-client collect-only path
 // (RootHeraldCollectEvidence) build on this so the evidence shape is identical.
 //

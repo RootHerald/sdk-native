@@ -22,7 +22,10 @@ attestation verdict.
    into Unity. The recommended path is via the
    [NuGetForUnity](https://github.com/GlitchEnzo/NuGetForUnity) plugin so
    the managed wrapper's transitive references are resolved automatically.
-4. Set `RH_PUBLISHABLE_KEY` in your `RootHeraldGate` script (see
+4. No RootHerald key goes in the client — the SDK is keyless. The
+   `RootHeraldGate` script collects attestation evidence locally and hands it
+   to YOUR backend, which relays it to RootHerald with your `rh_sk_` secret and
+   enforces the verdict server-side (see
    `Assets/RootHerald/Scripts/RootHeraldGate.cs`).
 5. Open `Assets/RootHerald/Scenes/Sample.unity` and press Play.
 

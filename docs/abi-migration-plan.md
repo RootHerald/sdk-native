@@ -8,9 +8,10 @@ server SDKs expose **enroll-relay / challenge / verify**; `Verify` / `AttestSess
 
 ## The core change (why this is big)
 
-Today the **client** opens the HTTP sockets to RootHerald and holds the site key
-(`rootherald_win.cpp` does `HttpPost` for enroll/activate; `@rootherald/browser`/the
-host POST directly). The target moves **all RootHerald network I/O out of the client**:
+Before this migration the **client** opened the HTTP sockets to RootHerald and held a
+client key (`rootherald_win.cpp` did `HttpPost` for enroll/activate; `@rootherald/browser`/the
+host POSTed directly). The migration (now landed) moved **all RootHerald network I/O out
+of the client**:
 the client only does local TPM ops and emits/consumes **opaque blobs**; the
 **customer's backend** (server SDK, `rh_sk_`) relays those blobs to RootHerald. That
 transport-removal is the spine of the migration and the riskiest part.
@@ -36,15 +37,15 @@ in `@rootherald/contracts` (TS source of truth) and mirrored per language. EK ce
 **plaintext for v1** (deniability layer deferred — see target-abi.md).
 
 **Removed everywhere:** `Verify` (client-gets-verdict), `AttestSession` + `SetLinkToken`,
-client publishable key + `SetEndpoint`.
+client key + `SetEndpoint`.
 
 ## Work packages
 
 | # | Package | Repo | Depends on | Scope | Build/test here? |
 |---|---|---|---|---|---|
 | WP0 | **Interface contract** — protocol spec + `@rootherald/contracts` types (3 verbs, 4 blobs, backend HTTP contract, error model). Single source of truth. | sdk-js (contracts) | — | M | ✅ |
-| WP1 | **platform/services/api** — confirm enroll/activate/challenge/verify support backend relay with `rh_sk_` server auth; deprecate client/site-key verdict endpoints (Verify/AttestSession server side); EK plaintext kept. | platform | WP0 | M | ✅ (xUnit) |
-| WP2 | **sdk-native** — refactor C ABI to Enroll(begin/complete)/Attest/PreCheck emitting/consuming blobs; **remove in-SDK HTTP transport + site key + SetEndpoint + Verify/AttestSession/SetLinkToken**. Windows real; Linux/macOS honesty-guarded. RISKIEST — front-load. | sdk-native | WP0 | L | ⚠️ C++/VS2022 |
+| WP1 | **platform/services/api** — confirm enroll/activate/challenge/verify support backend relay with `rh_sk_` server auth; deprecate client-verdict endpoints (Verify/AttestSession server side); EK plaintext kept. | platform | WP0 | M | ✅ (xUnit) |
+| WP2 | **sdk-native** — refactor C ABI to Enroll(begin/complete)/Attest/PreCheck emitting/consuming blobs; **remove in-SDK HTTP transport + client key + SetEndpoint + Verify/AttestSession/SetLinkToken**. Windows real; Linux/macOS honesty-guarded. RISKIEST — front-load. | sdk-native | WP0 | L | ⚠️ C++/VS2022 |
 | WP3 | **sdk-js** — `@rootherald/browser` (3-verb blob client, no RootHerald I/O), `@rootherald/node` (relay/challenge/verify server helpers). | sdk-js | WP0 | L | ✅ |
 | WP4a–e | **server SDKs** — go / php / ruby / java / dotnet: implement relay/challenge/verify; remove client-verdict helpers. Parallel, independent. | sdk-go/php/ruby/java/dotnet | WP0 | M ea | ⚠️ per toolchain |
 | WP5 | **browser-extension** — page↔host message protocol → new blob relay (enroll begin/complete, attest collect); drop verdict handling. | browser-extension | WP0, WP6 | M | ✅ |
