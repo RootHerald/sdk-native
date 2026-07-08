@@ -109,13 +109,13 @@
  *       RootHeraldClient_Enroll stays for non-browser embedders that POST direct.
  * 1.3 — ADDED RootHeraldClient_CollectEvidence + RootHeraldClient_FreeEvidence
  *       (Background-Check "dumb client", contract C5). Additive only; every
- *       1.2 symbol is unchanged. Collect-only: NO API/site key required and NO
+ *       1.2 symbol is unchanged. Collect-only: NO key required and NO
  *       RootHerald network call — returns the self-contained evidence blob to
  *       the embedder, who hands it to the CUSTOMER's server (which relays it
- *       server→server to POST /api/v1/attestations/verify). The existing
- *       key-bearing Create / AttestSession / Verify entry points remain for the
- *       Passport / "badge" tier (backend-less customers that POST directly to
- *       RootHerald with a publishable key).
+ *       server→server to POST /api/v1/attestations/verify). At the time, the
+ *       key-bearing Create / AttestSession / Verify entry points still existed
+ *       for backend-less customers that POST directly to RootHerald (all since
+ *       removed in the keyless 3.0 ABI above).
  * 1.2 — RootHeraldClient_CollectPosture (local-only readiness snapshot).
  */
 
