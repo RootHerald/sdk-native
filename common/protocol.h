@@ -40,10 +40,16 @@ extern "C" {
  * POST /api/v1/devices/enroll  (client -> server)
  *   {
  *     "ekCertPem":    "...PEM..."        // optional; omitted on firmware TPMs
- *                                        // (e.g. Intel PTT) with no NV cert.
- *                                        // Windows clients also try AMD AIA
- *                                        // (https://ftpm.amd.com/pki/aia/<hash>)
- *                                        // before giving up on this field.
+ *                                        // (e.g. Intel PTT / AMD fTPM) with no
+ *                                        // NV cert. The client only reads what's
+ *                                        // LOCAL; when this is omitted the SERVER
+ *                                        // recovers the vendor-signed leaf from
+ *                                        // the manufacturer online service
+ *                                        // (Intel EKOP / AMD AIA), keyed by the
+ *                                        // EK pub. Keeping that outbound vendor
+ *                                        // call server-side keeps egress control
+ *                                        // and lets the backend cache + persist
+ *                                        // the recovered cert.
  *     "ekCertificateChain": ["...PEM..."] // ADDED 2026-05; optional. List of
  *                                        // intermediate CA certificates the
  *                                        // client recovered from one or more
