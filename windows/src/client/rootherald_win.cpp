@@ -24,7 +24,6 @@
 #include "tpm_commands.h"
 #include "attestation_key_provider.h"
 #include "tbs_key_provider.h"
-#include "amd_aia_fetch.h"
 #include "event_log.h"
 #include "event_log_parser.h"
 #include "secureboot_validator.h"
@@ -311,21 +310,21 @@ static bool GatherEkEnrollData(EkEnrollData& out)
     RH_LOG_WARN("[enroll] EK pub: %zu bytes\n", out.ekPub.size());
 
     // Prefer Windows' cached EK cert (the real vendor-signed cert — works for
-    // firmware TPMs that don't surface it via PCP). Fall back to the PCP NV
-    // read, then the AMD AIA fetch.
+    // firmware TPMs that don't surface it via PCP). Fall back to the PCP NV read.
+    // We only read what's LOCAL to the machine here; if no NV-stored cert exists
+    // (older Intel PTT / AMD fTPM), we send just the EK pub + any NV intermediate
+    // chain and the SERVER recovers the vendor-signed leaf from the manufacturer
+    // online service (Intel EKOP / AMD AIA), keyed by the EK pub. Keeping that
+    // outbound vendor call server-side means the customer's app never reaches
+    // ftpm.amd.com from our embedded code, and the backend caches + persists the
+    // recovered cert. See platform VendorEkCertFetcher.
     auto ekCert = ReadEkCertFromWindowsStore();
     if (ekCert.size() <= 32) ekCert = pcp.ReadEkCertificate();
     if (ekCert.size() > 32) {
         RH_LOG_WARN("[enroll] EK cert: %zu bytes\n", ekCert.size());
         out.ekCertPem = DerToPem(ekCert);
     } else {
-        // Firmware TPM (Intel PTT / AMD fTPM): no NV EK cert. Try AMD's AIA
-        // endpoint; otherwise rely on ekCertificateChain + server leniency.
-        auto modulus = RootHerald::ExtractRsaModulusFromEkPub(out.ekPub);
-        if (!modulus.empty()) {
-            auto amdCert = RootHerald::FetchAmdAiaEkCert(modulus);
-            if (!amdCert.empty()) out.ekCertPem = DerToPem(amdCert);
-        }
+        RH_LOG_WARN("[enroll] no NV EK cert (firmware TPM); server will recover from vendor by EK pub\n");
     }
 
     RootHerald::TpmCommands tpm;
