@@ -1,9 +1,13 @@
 name: Release
 
 # Builds platform-specific artifacts and attaches them to the GitHub Release.
-# Downstream repos (e.g. sdk-dotnet for RootHerald.Native runtime bundling,
-# windows-host for the installables) pull RootHerald.lib / librootherald.a /
-# the macOS framework from the release tag.
+# Downstream repos (sdk-dotnet for RootHerald.Native runtime bundling,
+# windows-host for the installables) pull RootHerald.lib / librootherald.a from
+# the release tag.
+#
+# Each job stages via `cmake --install`, so every archive carries lib/ AND
+# include/ (rootherald.h + protocol.h). A previous version published the static
+# library alone, which a customer cannot compile against.
 on:
   push:
     tags:
@@ -11,6 +15,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write        # Sigstore provenance
+  attestations: write
 
 jobs:
   windows:
@@ -20,11 +26,15 @@ jobs:
       - run: |
           cmake -B build/windows -S windows -A x64
           cmake --build build/windows --config Release
+          cmake --install build/windows --config Release --prefix stage/rootherald-windows-x64
         shell: pwsh
+      - name: Checksums
+        shell: bash
+        run: cd stage/rootherald-windows-x64 && find . -type f -exec sha256sum {} + > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-x64
-          path: build/windows/Release/*.lib
+          name: rootherald-windows-x64
+          path: stage/rootherald-windows-x64/**
 
   linux:
     runs-on: ubuntu-latest
@@ -34,22 +44,37 @@ jobs:
       - run: |
           cmake -B build/linux -S linux
           cmake --build build/linux
+          cmake --install build/linux --prefix stage/rootherald-linux-x64
+      - name: Checksums
+        run: cd stage/rootherald-linux-x64 && find . -type f -exec sha256sum {} + > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-x64
-          path: build/linux/*.a
+          name: rootherald-linux-x64
+          path: stage/rootherald-linux-x64/**
 
   macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      # Genuinely universal. The previous workflow named its artifact
+      # "macos-universal" while building host-arch only — on arm64 runners that
+      # shipped an Apple-silicon-only archive to Intel customers.
       - run: |
-          cmake -B build/macos -S macos
+          cmake -B build/macos -S macos -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
           cmake --build build/macos
+          cmake --install build/macos --prefix stage/rootherald-macos-universal
+      - name: Verify both slices are present
+        run: |
+          lib=$(find stage/rootherald-macos-universal -name '*.a' | head -1)
+          lipo -info "$lib"
+          lipo -info "$lib" | grep -q "x86_64" && lipo -info "$lib" | grep -q "arm64" \
+            || { echo "::error::not a universal binary"; exit 1; }
+      - name: Checksums
+        run: cd stage/rootherald-macos-universal && find . -type f -exec shasum -a 256 {} + > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-universal
-          path: build/macos/*.a
+          name: rootherald-macos-universal
+          path: stage/rootherald-macos-universal/**
 
   release:
     needs: [windows, linux, macos]
@@ -58,7 +83,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { path: dist }
+      - name: Archive each platform
+        run: |
+          cd dist
+          for d in */; do
+            name="${d%/}"
+            tar -czf "../${name}.tar.gz" -C "$name" .
+          done
+          cd .. && sha256sum *.tar.gz > SHA256SUMS.txt
+      # Signs nothing with a CA — a static .lib is a COFF archive, not a PE, and
+      # cannot be Authenticode-signed. Sigstore provenance binds the artifact to
+      # the commit and workflow that produced it, verifiable with
+      # `gh attestation verify <file> --repo RootHerald/sdk-native`.
+      - uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: '*.tar.gz'
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/*
+          files: |
+            *.tar.gz
+            SHA256SUMS.txt
           generate_release_notes: true
