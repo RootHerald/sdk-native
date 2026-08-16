@@ -1,3 +1,22 @@
+> ## This repository has been split
+>
+> The Windows, Linux and macOS SDKs now live in their own repositories. The
+> three implementations shared a C ABI and no source at all, so keeping them
+> together meant a reviewer read ~9,800 lines to reach the fraction that runs on
+> their machine — in a repo that is public precisely so it can be read.
+>
+> | Platform | Repository |
+> |---|---|
+> | Windows | [RootHerald/sdk-windows](https://github.com/RootHerald/sdk-windows) |
+> | Linux | [RootHerald/sdk-linux](https://github.com/RootHerald/sdk-linux) |
+> | macOS | [RootHerald/sdk-macos](https://github.com/RootHerald/sdk-macos) |
+>
+> Each carries its own per-file history, a vendored copy of the ABI headers, and
+> a CI job that fails if those headers drift apart. Developer diagnostics moved
+> to the private `sdk-native-tools`.
+>
+> This repository is archived and read-only. Nothing further ships from here.
+
 # Root Herald — Native SDK
 
 Embeddable static library for hardware-rooted device attestation. You link it
