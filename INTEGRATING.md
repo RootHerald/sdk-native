@@ -187,9 +187,11 @@ enrollment needs elevation.
 - Requires Windows 10 1809+ for the TPM PCP surface used by NCrypt.
 - Configure: `cmake -B build -S windows -G "Visual Studio 17 2022" -A x64`
 - Build the lib only: `cmake --build build --config Release --target RootHerald`
-- The `tools/` executables (`test_client`, `tpm_diag`, `boot_verify`,
-  `test_harness`) are diagnostics. They are **not** part of `RootHerald.lib`
-  and not intended for customer redistribution.
+- Developer diagnostics (`tpm_diag`, `boot_verify`, `test_harness`,
+  `test_client`, `dbx_checker`, `gate_collect`) are **not** in this repo. They
+  were never part of `RootHerald.lib` and are not for customer redistribution,
+  so they live in the private `RootHerald/sdk-native-tools`, where they build
+  against a released archive rather than this source tree.
 
 ### Linux (`linux/`)
 
@@ -223,11 +225,10 @@ sdk-native/
 ├── windows/
 │   ├── src/                 # PRIVATE — library implementation, not exposed
 │   │   ├── client/   tpm/   boot/   certs/   transport/   internal/
-│   └── tools/               # NOT part of RootHerald.lib — dev diagnostics
 ├── linux/
-│   ├── src/   tools/        # same structure
+│   ├── src/                 # same structure
 ├── macos/
-│   ├── src/   tools/        # same structure
+│   ├── src/                 # same structure
 └── samples/
     ├── minimal/             # The smallest possible "link + call Verify" demo per OS
     ├── unity/   unreal/     # Game-engine plugin samples
@@ -310,8 +311,8 @@ a non-OK status:
 1. `RootHerald_ErrorString(status)` for the human-readable category.
 2. Register a log callback at `ROOTHERALD_LOG_DEBUG` to see the per-step
    trace (TPM init, AK create / activate, evidence collection).
-3. On Windows, run `tools/tpm_diag.exe` to confirm the platform exposes
-   a usable TPM. On Linux, ensure `/dev/tpmrm0` exists and your process
+3. On Windows, `tpm_diag.exe` (from the private `sdk-native-tools` repo)
+   confirms the platform exposes a usable TPM. On Linux, ensure `/dev/tpmrm0` exists and your process
    has access.
 
 ## License
